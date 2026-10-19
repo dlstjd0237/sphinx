@@ -16,6 +16,7 @@ import { loadChangeView } from './change-view.js';
 import { updateStatus, updatePlan, scheduleUpdate } from './update.js';
 import { modelChoices, validChoice } from './model-choices.js';
 import { setRepositoryDistance } from './repo-config.js';
+import { pullRequestPush, usesSphinxAction } from './github.js';
 
 const ID = /^[a-f0-9]{64}$/u;
 const cancelled = () => Object.assign(new Error('Check paused. Progress is saved.'), { code: 'SPHINX_CANCELLED' });
@@ -85,6 +86,8 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
   // Distance is part of the check's policy, so it is written only when this check ends.
   let distance = null;
   const afterClose = [];
+  // Whether to post the Sphinx stamp to the pull request, per checkpoint; read by the Git hook after a pass.
+  let stamp = null; const stampChoices = new Map();
   // The repository's understanding score, refreshed after every graded answer.
   const refreshScore = async (repoRoot, operationEnv) => { score = scoreSummary(await readStats(repoRoot, operationEnv)); };
   // Read-only display of the checkpoint's frozen comparison. It is loaded
@@ -114,7 +117,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
   // Display-only updates (change view, evidence) keep the revision, so they
   // never turn an answer already in flight into a stale submission.
   const publish = (next, { display = false } = {}) => {
-    state = { ...next, messages: transcript, ...(score ? { score } : {}), ...(update ? { update } : {}), ...(repoName ? { repoName } : {}), ...(models ? { models: { groups: models.groups, reviewing: !!reviewAttempt, busy: grading } } : {}), ...(distance ? { distance: { current: distance.current, next: distance.next, scope: distance.scope } } : {}), change: viewState(), evidence: evidence && evidence.checkpoint === next.id ? { questionId: evidence.questionId, refs: evidence.refs } : undefined, waitingGit, operationClosed: closed, revision: display ? next.revision : randomUUID(), sequence: ++sequence };
+    state = { ...next, messages: transcript, ...(score ? { score } : {}), ...(update ? { update } : {}), ...(repoName ? { repoName } : {}), ...(models ? { models: { groups: models.groups, reviewing: !!reviewAttempt, busy: grading } } : {}), ...(distance ? { distance: { current: distance.current, next: distance.next, scope: distance.scope } } : {}), ...(stamp ? { stamp } : {}), change: viewState(), evidence: evidence && evidence.checkpoint === next.id ? { questionId: evidence.questionId, refs: evidence.refs } : undefined, waitingGit, operationClosed: closed, revision: display ? next.revision : randomUUID(), sequence: ++sequence };
     const event = `data: ${JSON.stringify(state)}\n\n`;
     for (const stream of streams) writeEvent(stream, event);
   };
@@ -161,6 +164,13 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
     }
     if (req.method !== 'POST' || segments[2] !== 'action') return send(res, 405, { error: 'Unsupported method.' });
     if (req.headers.origin !== origin || !equal(req.headers['x-sphinx-token'], token) || req.headers['content-type']?.split(';')[0] !== 'application/json') return send(res, 403, { error: 'Forbidden request.' });
+    if (new URL(req.url, origin).searchParams.get('stamp') === '1') {
+      let post; try { post = JSON.parse(await readBody(req, 256))?.post; } catch { return send(res, 400, { error: 'Invalid choice.' }); }
+      if (!stamp || typeof post !== 'boolean') return send(res, 409, { error: 'There is no pull request stamp to set for this check.' });
+      stamp = { ...stamp, post }; stampChoices.set(state.id, post);
+      publish(state, { display: true });
+      return send(res, 200, { stamp });
+    }
     if (new URL(req.url, origin).searchParams.get('distance') === '1') {
       let picked; try { picked = JSON.parse(await readBody(req, 1024))?.distance; } catch { return send(res, 400, { error: 'Invalid distance.' }); }
       if (!distance) return send(res, 409, { error: 'Wait for the check to start.' });
@@ -313,6 +323,12 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
       // Whether this repository chose its distance, or it comes from your machine-wide setting.
       const repoSets = await repositoryConfigInfo(request.repoRoot).then(info => info.exists && readJson(info.path)).then(local => Object.hasOwn(local || {}, 'distance')).catch(() => false);
       distance = { current: session.config?.distance ?? config.distance, next: null, scope: repoSets ? 'repository' : 'machine' };
+      stamp = null;
+      if (await pullRequestPush(session.snapshot).catch(() => false)) {
+        const action = await usesSphinxAction(request.repoRoot).catch(() => false);
+        stamp = { post: stampChoices.get(request.id) ?? (action || !!config.github?.comment), action };
+        stampChoices.set(request.id, stamp.post);
+      }
       const refreshModels = async route => { models = { groups: await modelChoices({ config, env: operationEnv, plans, current: route }).catch(() => []) }; };
       await refreshModels(visible.route);
       const applySwitch = async ({ provider, model, saveDefault }) => {
@@ -442,7 +458,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
         afterClose.push(() => loadConfig(undefined, operationEnv).then(saved => saveConfig({ ...saved, models: { small: { provider, model }, medium: { provider, model }, large: { provider, model } } }, operationEnv)));
       }
       if (distance?.next) { const { next } = distance, root = request.repoRoot; afterClose.push(() => setRepositoryDistance(root, next, { env: operationEnv })); }
-      switchModel = null; models = null; distance = null;
+      switchModel = null; models = null; distance = null; stamp = null;
       active = undefined;
     }
   }
@@ -459,5 +475,6 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
       await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); });
     }
   }
-  return { present, close, get url() { return url; }, get state() { return structuredClone(state); } };
+  // stampChoice(id): the human's choice to post a checkpoint's stamp to its PR, or undefined when not offered.
+  return { present, close, stampChoice: id => stampChoices.get(id), get url() { return url; }, get state() { return structuredClone(state); } };
 }

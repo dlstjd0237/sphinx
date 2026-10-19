@@ -254,7 +254,7 @@ After commits, merges, rewrites, and checkouts, Sphinx schedules a detached revi
 
 ## GitHub commit status and pull requests
 
-When you push to GitHub and a check passes, Sphinx marks the pushed commit with a `sphinx/understanding` commit status, for example "Understood: 3 questions, 2 first try". It shows next to the commit and in the pull request's checks. A skipped check is marked as a failure ("Understanding check skipped"). Yolo pushes and commit checkpoints are not marked.
+When you push to GitHub and a check passes, Sphinx marks the pushed commit with a `sphinx/understanding` commit status, for example "Sphinx stamped · 3 questions, 2 first try". It shows next to the commit and in the pull request's checks. A skipped check is marked as a failure ("Understanding check skipped"). Yolo pushes and commit checkpoints are not marked.
 
 ```json
 { "github": { "status": true, "comment": false, "answers": false } }
@@ -270,7 +270,24 @@ Set these in `config.json` for yourself or in `.sphinxconfig` for a repository. 
 
 It uses the [GitHub CLI](https://cli.github.com) and its existing login, in a detached process after Git continues, so it never slows or blocks a push. If `gh` is missing or not signed in, the remote isn't GitHub, or any request fails, nothing is posted and nothing else changes. The worker waits a few minutes for the push to land and up to 15 minutes for a pull request to be opened; the result of the last run is in `github/last.json` in Sphinx's data directory.
 
-**Requiring it for a team.** In the repository's branch protection or ruleset, add `sphinx/understanding` as a required status check. Pull requests whose head commit was not pushed through a passing check then cannot merge. The status is self-reported by the pusher's machine: it shows the check happened, but it is not a cryptographic proof, and anyone with write access can set a commit status.
+### The Sphinx check (GitHub Action)
+
+Commit statuses are one line. For a proper **Sphinx** check with a summary in the pull request's Checks tab, add the Sphinx Action to the repository:
+
+```sh
+sphinx init --github-check     # writes .github/workflows/sphinx.yml; commit and push it
+```
+
+How it fits together:
+
+- **On the contributor's machine:** after a pass, Sphinx comments on the branch's pull request with a summary and an encoded stamp for that exact commit. For a pull request from a fork, the comment goes on the upstream pull request. The questionnaire shows "Post the Sphinx stamp to the pull request" for pushes that look like a pull request (a GitHub remote, not its default branch). It is on by default when the repository has the Sphinx workflow, and otherwise follows `github.comment`.
+- **In the repository:** the Action runs when a pull request is opened or updated and when a comment is posted or edited. It reads the newest stamp for the pull request's latest commit, from the author or someone with write access, and writes the **Sphinx** check: stamped, with the number of questions, first-try results, depth, distance, and reviewer; failed if the check was skipped; or neutral ("No Sphinx stamp for this commit") until the author passes. With `require: true` in the workflow, a missing stamp fails the check instead.
+- **Safety:** the workflow uses `pull_request_target` and `issue_comment` so it can write checks for fork pull requests, and it never checks out or runs pull request code. It reads comments through the API only. It needs `checks: write` and read access to pull requests and issues.
+- When a repository runs the Action, Sphinx skips the separate commit status, since the check replaces it.
+
+The workflow pins the Action to a Sphinx release tag (`parthh01/sphinx/action@v0.1.12`, for example). Any repository can use it; the path only says where the Action's code lives.
+
+**Requiring it for a team.** With the Action, set `require: true` and add the **Sphinx** check to branch protection. Without it, add `sphinx/understanding` as a required status check. Pull requests whose head commit was not pushed through a passing check then cannot merge. The status is self-reported by the pusher's machine: it shows the check happened, but it is not a cryptographic proof, and anyone with write access can set a commit status.
 
 ## Browser or terminal
 

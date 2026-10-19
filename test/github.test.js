@@ -28,14 +28,14 @@ test('recognizes GitHub remotes only', () => {
 test('summaries count first tries like the score and never include answer keys', () => {
   const record = checkRecord({ session, snapshot, outcome: 'passed' });
   assert.deepEqual(record.questions.map(q => [q.prompt, q.tries, q.firstTry]), [['What happens on retry?', 1, true], ['What does a timeout do?', 2, false]]);
-  assert.deepEqual(statusFor(record), { state: 'success', description: 'Understood: 2 questions, 1 first try' });
+  assert.deepEqual(statusFor(record), { state: 'success', description: 'Sphinx stamped · 2 questions, 1 first try' });
   const body = commentBody([record]);
   assert.ok(body.startsWith(COMMENT_MARKER));
   assert.match(body, /claude sonnet/);
   assert.doesNotMatch(body, /PRIVATE_|returns the prior result/);
   assert.match(commentBody([checkRecord({ session, snapshot, outcome: 'passed', includeAnswers: true })]), /> returns the prior result/);
   assert.equal(statusFor(checkRecord({ session: null, snapshot, outcome: 'skipped' })).state, 'failure');
-  assert.equal(statusFor(checkRecord({ session: { questions: [], noQuestionReason: 'docs' }, snapshot, outcome: 'passed' })).description, 'Passed without questions');
+  assert.equal(statusFor(checkRecord({ session: { questions: [], noQuestionReason: 'docs' }, snapshot, outcome: 'passed' })).description, 'Sphinx stamped · no questions needed');
 });
 
 async function home(t) {
@@ -89,12 +89,12 @@ test('waits for the push to land, then posts the commit status', async t => {
   const { gh, calls } = fakeGh([[/^auth/, ok()], [/commits\//, () => (++polls < 3 ? { ok: false } : ok('sha'))], [/statuses\//, ok()]]);
   assert.equal(await runStampJob(await job(t), { gh, wait: async () => {} }), 'done');
   const status = calls.find(call => /statuses\//.test(call.args.join(' ')));
-  assert.deepEqual(status.input, { state: 'success', context: STATUS_CONTEXT, description: 'Understood: 2 questions, 1 first try' });
+  assert.deepEqual(status.input, { state: 'success', context: STATUS_CONTEXT, description: 'Sphinx stamped · 2 questions, 1 first try' });
   assert.ok(!calls.some(call => call.args[0] === 'pr'));
 });
 
 test('creates the pull request comment once, then edits it in place', async t => {
-  const responses = [[/^auth/, ok()], [/commits\//, ok('sha')], [/statuses\//, ok()], [/^pr list/, ok('[{"number":7}]')], [/issues\/comments\/55/, ok('https://github.com/c/55\n')], [/issues\/7\/comments --method POST/, ok('https://github.com/c/new\n')]];
+  const responses = [[/^auth/, ok()], [/commits\//, ok('sha')], [/statuses\//, ok()], [/^api user/, ok('me\n')], [/repos\/acme\/widgets --jq/, ok('')], [/pulls\?state=open/, ok('[{"number":7}]')], [/issues\/comments\/55/, ok('https://github.com/c/55\n')], [/issues\/7\/comments --method POST/, ok('https://github.com/c/new\n')]];
   const first = fakeGh([[/issues\/7\/comments --paginate/, ok('')], ...responses]);
   assert.equal(await runStampJob(await job(t, { comment: true }), { gh: first.gh, wait: async () => {} }), 'done');
   const posted = first.calls.find(call => /--method POST/.test(call.args.join(' ')) && /issues/.test(call.args.join(' ')));
@@ -106,7 +106,7 @@ test('creates the pull request comment once, then edits it in place', async t =>
 });
 
 test('a branch without a pull request gives up quietly', async t => {
-  const { gh } = fakeGh([[/^auth/, ok()], [/commits\//, ok('sha')], [/statuses\//, ok()], [/^pr list/, ok('[]')]]);
+  const { gh } = fakeGh([[/^auth/, ok()], [/commits\//, ok('sha')], [/statuses\//, ok()], [/repos\/acme\/widgets --jq/, ok('')], [/pulls\?state=open/, ok('[]')]]);
   assert.equal(await runStampJob(await job(t, { comment: true, status: false }), { gh, wait: async () => {}, prTries: 3 }), 'no-pull-request');
 });
 
@@ -115,4 +115,40 @@ test('github settings validate, merge from .sphinxconfig, and stay out of the po
   assert.throws(() => validateConfig({ ...structuredClone(DEFAULT_CONFIG), github: { extra: true } }), /github/);
   assert.doesNotThrow(() => validateRepositoryConfig({ github: { comment: true } }));
   assert.equal(policyHash(DEFAULT_CONFIG), policyHash({ ...DEFAULT_CONFIG, github: { status: false, comment: true, answers: true } }));
+});
+
+test('the PR comment carries an encoded stamp for the pushed commit, and only this person\u2019s comment is edited', async t => {
+  const responses = [[/^auth/, ok()], [/commits\//, ok('sha')], [/^api user/, ok('me\n')], [/repos\/acme\/widgets --jq/, ok('')], [/pulls\?state=open/, ok('[{"number":7}]')], [/issues\/7\/comments --paginate/, ok('')], [/issues\/7\/comments --method POST/, ok('https://github.com/c/new\n')]];
+  const { gh, calls } = fakeGh(responses);
+  await runStampJob(await job(t, { comment: true, status: false }), { gh, wait: async () => {} });
+  const lookup = calls.find(call => /comments --paginate/.test(call.args.join(' ')));
+  assert.match(lookup.args.join(' '), /\.user\.login == "me"/);
+  const body = calls.find(call => /--method POST/.test(call.args.join(' '))).input.body;
+  const { parseStamp } = await import('../action/index.mjs');
+  const stamp = parseStamp(body);
+  assert.equal(stamp.head, snapshot.head); assert.equal(stamp.outcome, 'passed');
+  assert.deepEqual(stamp.questions.map(q => q.firstTry), [true, false]);
+  assert.doesNotMatch(JSON.stringify(stamp), /PRIVATE_|returns the prior result/, 'no answers or answer keys');
+});
+
+test('from a fork, the stamp goes to the upstream pull request', async t => {
+  const { gh, calls } = fakeGh([[/^auth/, ok()], [/commits\//, ok('sha')], [/^api user/, ok('me\n')], [/repos\/acme\/widgets --jq/, ok('upstream/widgets\n')],
+    [/repos\/acme\/widgets\/pulls\?/, ok('[]')], [/repos\/upstream\/widgets\/pulls\?state=open&head=acme%3Afeature/, ok('[{"number":9}]')],
+    [/upstream\/widgets\/issues\/9\/comments --paginate/, ok('')], [/upstream\/widgets\/issues\/9\/comments --method POST/, ok('https://github.com/c/9\n')]]);
+  assert.equal(await runStampJob(await job(t, { comment: true, status: false }), { gh, wait: async () => {} }), 'done');
+  assert.ok(calls.some(call => /upstream\/widgets\/issues\/9\/comments --method POST/.test(call.args.join(' '))));
+});
+
+test('a repository running the Sphinx Action gets the comment instead of a commit status', async t => {
+  const env = await home(t), calls = [];
+  const repoRoot = join(env.SPHINX_HOME, 'repo');
+  const { mkdir } = await import('node:fs/promises');
+  await mkdir(join(repoRoot, '.github', 'workflows'), { recursive: true });
+  await writeFile(join(repoRoot, '.github', 'workflows', 'sphinx.yml'), 'jobs:\n  stamp:\n    steps:\n      - uses: someone/sphinx/action@v1\n');
+  assert.equal(await scheduleStamp({ snapshot: { ...snapshot, repoRoot }, session, outcome: 'passed', config: config({}), env, spawnImpl: fakeSpawn(calls) }), true);
+  const job = JSON.parse(await readFile(calls[0][1].at(-1), 'utf8'));
+  assert.deepEqual([job.status, job.comment], [false, true]);
+  calls.length = 0;
+  await scheduleStamp({ snapshot: { ...snapshot, repoRoot }, session, outcome: 'passed', config: config({}), env, spawnImpl: fakeSpawn(calls), post: false });
+  assert.equal(calls.length, 0, 'turning the toggle off posts nothing');
 });

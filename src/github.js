@@ -1,6 +1,6 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { unlink } from 'node:fs/promises';
+import { readdir, readFile, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getPaths, readJson, writeJson } from './config.js';
@@ -11,6 +11,9 @@ import { getPaths, readJson, writeJson } from './config.js';
 // no GitHub remote, no gh CLI, no login, or any API error just means no stamp.
 export const STATUS_CONTEXT = 'sphinx/understanding';
 export const COMMENT_MARKER = '<!-- sphinx-understanding -->';
+// The repository's Sphinx Action reads this from the PR comment to create its check run.
+export const STAMP_MARKER = 'sphinx-stamp:v1';
+export const ACTION_REF = 'parthh01/sphinx/action';
 const RECORDS_KEPT = 20;
 const WORKER = fileURLToPath(new URL('./github-worker.js', import.meta.url));
 const digest = value => createHash('sha256').update(value).digest('hex');
@@ -51,18 +54,32 @@ export function checkRecord({ session, snapshot, outcome, includeAnswers = false
 export function statusFor(record) {
   if (record.outcome === 'skipped') return { state: 'failure', description: 'Understanding check skipped' };
   const asked = record.questions.length;
-  if (!asked) return { state: 'success', description: 'Passed without questions' };
+  if (!asked) return { state: 'success', description: 'Sphinx stamped · no questions needed' };
   const first = record.questions.filter(item => item.firstTry).length;
   const known = record.questions.every(item => typeof item.firstTry === 'boolean');
-  return { state: 'success', description: `Understood: ${asked} question${asked === 1 ? '' : 's'}${known ? `, ${first} first try` : ''}` };
+  return { state: 'success', description: `Sphinx stamped · ${asked} question${asked === 1 ? '' : 's'}${known ? `, ${first} first try` : ''}` };
 }
+
+/** What the Sphinx Action needs for one commit: the outcome and summary, never answers or answer keys. */
+export function stampPayload(record) {
+  return {
+    v: 1, head: record.head, base: record.base ?? null, outcome: record.outcome, at: record.at,
+    level: record.level ?? null, distance: record.distance ?? null, model: record.model ?? null, stats: record.stats ?? null,
+    noQuestionReason: record.noQuestionReason ?? null,
+    questions: record.questions.map(question => ({ prompt: String(question.prompt).slice(0, 600), ...(typeof question.tries === 'number' ? { tries: question.tries, firstTry: question.firstTry } : {}) })),
+  };
+}
+// Base64 keeps question text from ever closing the HTML comment it travels in.
+const encodeStamp = record => `<!-- ${STAMP_MARKER} ${Buffer.from(JSON.stringify(stampPayload(record))).toString('base64')} -->`;
 
 const quote = text => String(text).trim().split('\n').map(line => `> ${line}`).join('\n');
 const short = sha => String(sha || '').slice(0, 7);
 
 /** One PR comment covering every check recorded for the branch, newest first. */
-export function commentBody(records) {
+export function commentBody(records, { stampHead } = {}) {
   const lines = [COMMENT_MARKER, '### Sphinx understanding checks', ''];
+  const stamped = stampHead && records.find(record => record.head === stampHead);
+  if (stamped) lines.splice(1, 0, encodeStamp(stamped));
   for (const record of [...records].reverse()) {
     const status = statusFor(record);
     const range = record.base ? `${short(record.base)}..${short(record.head)}` : short(record.head);
@@ -87,24 +104,82 @@ export function commentBody(records) {
  * Record the check and hand GitHub work to a detached worker so Git never
  * waits on the network. Never throws.
  */
-export async function scheduleStamp({ snapshot, session, outcome, config, env = process.env, spawnImpl = spawn }) {
+export async function scheduleStamp({ snapshot, session, outcome, config, env = process.env, spawnImpl = spawn, post }) {
   try {
     const settings = config.github || {};
-    if (snapshot.event !== 'pre-push' || (!settings.status && !settings.comment)) return false;
     const repo = githubRepository(snapshot.target.url);
-    if (!repo) return false;
+    if (snapshot.event !== 'pre-push' || !repo) return false;
+    // With the Sphinx Action, its check run replaces the commit status and reads the comment.
+    const action = await usesSphinxAction(snapshot.repoRoot);
+    const comment = typeof post === 'boolean' ? post : action || !!settings.comment;
+    const status = !!settings.status && !action;
+    if (!status && !comment) return false;
     const file = branchFile(snapshot.repoRoot, snapshot.target.ref, env);
     const stored = await readJson(file, null).catch(() => null);
     const record = checkRecord({ session, snapshot, outcome, includeAnswers: !!settings.answers });
     const records = [...(Array.isArray(stored?.records) ? stored.records : []).filter(item => item.head !== record.head), record].slice(-RECORDS_KEPT);
     await writeJson(file, { version: 1, repoRoot: snapshot.repoRoot, ref: snapshot.target.ref, records });
     const job = path.join(githubDirectory(env), 'jobs', `${randomUUID()}.json`);
-    await writeJson(job, { version: 1, repo, sha: snapshot.head, branch: snapshot.target.ref.replace(/^refs\/heads\//, ''), branchFile: file, status: !!settings.status, comment: !!settings.comment });
+    await writeJson(job, { version: 1, repo, sha: snapshot.head, branch: snapshot.target.ref.replace(/^refs\/heads\//, ''), branchFile: file, status, comment });
     const child = spawnImpl(process.execPath, [WORKER, job], { env, detached: true, stdio: 'ignore' });
     await new Promise((resolve, reject) => { child.once('error', reject); child.once('spawn', resolve); });
     child.unref();
     return true;
   } catch { return false; }
+}
+
+/**
+ * Whether a push could be for a pull request: to a GitHub remote, on a branch
+ * other than the remote's default (from local refs; main and master otherwise).
+ */
+export async function pullRequestPush(snapshot) {
+  if (snapshot?.event !== 'pre-push' || !githubRepository(snapshot.target?.url)) return false;
+  const branch = String(snapshot.target.ref || '').replace(/^refs\/heads\//, '');
+  const remote = snapshot.target.remote;
+  const named = /^[\w.-]+$/.test(remote || '') ? await new Promise(resolve => execFile('git', ['symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`], { cwd: snapshot.repoRoot }, (error, stdout) => resolve(error ? '' : stdout.trim()))) : '';
+  const fallback = named ? named.slice(remote.length + 1) : null;
+  return fallback ? branch !== fallback : !['main', 'master'].includes(branch);
+}
+
+/** The workflow that runs the Sphinx Action, pinned to this release's tag. */
+export function workflowTemplate(version) {
+  return `# Shows a "Sphinx" check on pull requests, from the stamp a contributor's Sphinx
+# posts after they pass its understanding check. https://github.com/parthh01/sphinx
+# It reads PR comments only and never checks out or runs pull request code, so it
+# is safe for pull requests from forks. Set require: true and make the "Sphinx"
+# check required in branch protection to block merging unstamped commits.
+name: Sphinx
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created, edited]
+permissions:
+  checks: write
+  pull-requests: read
+  issues: read
+concurrency:
+  group: sphinx-\${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+jobs:
+  stamp:
+    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ${ACTION_REF}@v${version}
+        with:
+          require: false
+`;
+}
+
+/** Whether this repository runs the Sphinx Action: a workflow using parthh01/sphinx/action, or a fork of it. */
+export async function usesSphinxAction(repoRoot) {
+  const directory = path.join(repoRoot, '.github', 'workflows');
+  const names = await readdir(directory).catch(() => []);
+  for (const name of names.filter(item => /\.ya?ml$/.test(item))) {
+    if (/uses:\s*[\w.-]+\/sphinx\/action@/.test(await readFile(path.join(directory, name), 'utf8').catch(() => ''))) return true;
+  }
+  return false;
 }
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -144,20 +219,28 @@ export async function runStampJob(job, { gh = ghCli, env = process.env, wait = s
   if (job.status) await postStatus();
   if (!job.comment) return 'done';
 
-  // A pull request is usually opened right after the first push of a branch.
-  let pull = null;
+  // A pull request is usually opened right after the first push of a branch. From a
+  // fork it lives in the upstream repository, with this fork's owner in its head.
+  const parent = (await api([`repos/${owner}/${repo}`, '--jq', '.parent.full_name // ""'])).stdout?.trim();
+  const places = [`${owner}/${repo}`, ...(parent ? [parent] : [])];
+  let pull = null, where = null;
   for (let attempt = 0; attempt < prTries && !pull; attempt++) {
     if (attempt) await wait(prEveryMs);
-    const listed = await gh(['pr', 'list', '--repo', `${owner}/${repo}`, '--head', job.branch, '--state', 'open', '--json', 'number', '--limit', '1'], { env, host });
-    try { pull = listed.ok ? JSON.parse(listed.stdout || '[]')[0] || null : null; } catch { pull = null; }
+    for (const place of places) {
+      const listed = await api([`repos/${place}/pulls?state=open&head=${encodeURIComponent(`${owner}:${job.branch}`)}&per_page=1`, '--jq', '[.[] | {number}]']);
+      try { pull = listed.ok ? JSON.parse(listed.stdout || '[]')[0] || null : null; } catch { pull = null; }
+      if (pull) { where = place; break; }
+    }
   }
   if (!pull) return 'no-pull-request';
-  const body = commentBody((await readJson(job.branchFile, null).catch(() => null))?.records || records);
-  const existing = await api([`repos/${owner}/${repo}/issues/${pull.number}/comments`, '--paginate', '--jq', `.[] | select(.body | startswith("${COMMENT_MARKER}")) | .id`]);
+  const body = commentBody((await readJson(job.branchFile, null).catch(() => null))?.records || records, { stampHead: job.sha });
+  // Only ever edit this person's own Sphinx comment; others on the PR keep theirs.
+  const me = (await api(['user', '--jq', '.login'])).stdout?.trim();
+  const existing = await api([`repos/${where}/issues/${pull.number}/comments`, '--paginate', '--jq', `.[] | select((.body | startswith("${COMMENT_MARKER}")) and .user.login == ${JSON.stringify(me || '')}) | .id`]);
   const id = existing.ok ? existing.stdout.split('\n').find(Boolean) : null;
   const written = id
-    ? await api([`repos/${owner}/${repo}/issues/comments/${id}`, '--method', 'PATCH', '--jq', '.html_url'], { body })
-    : await api([`repos/${owner}/${repo}/issues/${pull.number}/comments`, '--method', 'POST', '--jq', '.html_url'], { body });
+    ? await api([`repos/${where}/issues/comments/${id}`, '--method', 'PATCH', '--jq', '.html_url'], { body })
+    : await api([`repos/${where}/issues/${pull.number}/comments`, '--method', 'POST', '--jq', '.html_url'], { body });
   if (written.ok && job.status) await postStatus(written.stdout.trim());
   return written.ok ? 'done' : 'comment-failed';
 }

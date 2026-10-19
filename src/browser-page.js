@@ -26,6 +26,7 @@ header{min-height:52px;border-bottom:1px solid var(--line);padding:8px 24px;disp
 .model-menu .menu-foot{border-top:1px solid var(--line);margin-top:6px;padding:8px 14px 4px;display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12.5px;cursor:pointer}
 .model-menu .confirm{display:block!important;margin:2px 10px 8px;padding:8px 10px;border-radius:8px;background:var(--paper);font-size:12.5px}.model-menu .confirm p{margin:0}.model-menu .confirm div{display:flex;gap:6px;margin-top:8px}.model-menu .menu-error{margin:4px 14px;color:var(--retry);font-size:12.5px}
 @media(max-width:600px){.model-menu{position:fixed;left:12px;right:12px;top:auto;bottom:12px;width:auto}}
+.stamp-row{display:flex;align-items:center;gap:8px;margin:0 0 6px;color:var(--ink);font-size:13px;cursor:pointer}.stamp-row input{accent-color:var(--amber);margin:0}.stamp-row[hidden]{display:none}
 .plus{color:var(--add-ink)}.minus{color:var(--del-ink)}.facts .mono{font:600 12.5px var(--mono)}.scope-note{margin:2px 0 0;color:var(--muted);font-size:12px}#usage{color:var(--muted);font-weight:400;font-variant-numeric:tabular-nums}
 .tabs{display:none}.scope-short{display:none}
 .workspace{flex:1;min-height:0;display:grid;grid-template-columns:minmax(400px,46%) minmax(0,1fr);grid-template-rows:minmax(0,auto) minmax(0,1fr);grid-template-areas:"q files" "q diff"}
@@ -130,7 +131,7 @@ footer{flex-shrink:0;display:flex;flex-wrap:wrap;gap:2px 8px;padding:0 0 14px;co
 <form id="form"><label id="label" for="response">Your answer</label><textarea id="response" rows="2" maxlength="8000" autocomplete="off" spellcheck="true" placeholder="Your prediction and a short reason…"></textarea>
 <div class="actions"><button type="button" class="quiet" id="hint">Show hint</button><button type="button" class="quiet" data-action="learn">Explain this</button><button type="button" class="quiet" id="dispute">Dispute question</button><button id="submit" class="primary" type="submit">Send</button></div>
 <p class="hint">Enter to send · Shift+Enter for a new line. Answer from your understanding first; Show hint reveals the code behind the question.</p></form></div>
-<footer><p id="privacy">Answers go straight to Sphinx; your coding agent only sees whether you passed.</p><p id="waiting">Closing this tab leaves the check waiting. Use Pause check to stop.</p></footer>
+<footer><label id="stamp-row" class="stamp-row" hidden><input id="stamp" type="checkbox"><span>Post the Sphinx stamp to the pull request</span></label><p id="privacy">Answers go straight to Sphinx; your coding agent only sees whether you passed.</p><p id="waiting">Closing this tab leaves the check waiting. Use Pause check to stop.</p></footer>
 </main></div></div>
 <script nonce="${nonce}">
 const token=${JSON.stringify(token)},base='/'+token,$=id=>document.getElementById(id);
@@ -212,6 +213,13 @@ $('model').onclick=()=>{if(menuOpen){closeMenu();return;}closeDistance();menuOpe
 document.onkeydown=event=>{if(event.key!=='Escape')return;if(menuOpen){closeMenu();$('model').focus();}if(distanceOpen){closeDistance();$('distance').focus();}};
 // A click inside the menu can rebuild it, detaching the clicked button; that is not a click outside.
 document.onclick=event=>{if(event.target?.isConnected===false)return;if(menuOpen&&!$('model-menu').contains?.(event.target)&&!$('model').contains?.(event.target))closeMenu();if(distanceOpen&&!$('distance-menu').contains?.(event.target)&&!$('distance').contains?.(event.target))closeDistance();};
+// For a push that may be a pull request: whether to post the stamp there once you pass.
+function stampView(state){
+ const s=state.stamp,row=$('stamp-row');row.hidden=!s||finished;if(row.hidden)return;
+ $('stamp').checked=!!s.post;
+ row.title=(s.action?'This repository shows a Sphinx check on pull requests. ':'')+'After you pass, Sphinx comments on this branch\u2019s pull request with a summary: how many questions, which you got right first time, and the model.'+(s.action?' The Sphinx check reads it.':'')+' Your answers are not included unless you turn that on in your settings.';
+}
+$('stamp').onchange=async()=>{const want=$('stamp').checked;try{const res=await fetch(base+'/action?stamp=1',{method:'POST',headers:{'Content-Type':'application/json','X-Sphinx-Token':token},body:JSON.stringify({post:want})});if(!res.ok)$('stamp').checked=!want;}catch{$('stamp').checked=!want;}};
 // The question distance: shown as a chip, explained in its tooltip, and changeable
 // for this repository. It applies from the next check, since this one's questions exist.
 const DISTANCE_TEXT={high:['High level','High-level design: what the change does, how it fits into the system, and what it affects.'],mixed:['Mixed','A bit of both: some high-level design questions, some low-level implementation details.'],low:['Low level','Low-level implementation details: the specific logic, conditions, and edge cases.']};
@@ -298,7 +306,7 @@ function render(state){
  const previous=current;current=state;finished=state.operationClosed||['passed','paused','error','skipped'].includes(state.phase);
  const repo=state.repoName||state.repoRoot?.split(/[\\\\/]/).filter(Boolean).at(-1),branch=state.target?.replace(/^refs\\/heads\\//,'');
  text('meta',repo||state.change?.header?.repository||'');$('meta').title=state.repoRoot||'';
- modelView(state);distanceView(state);scoreView(state.score);updateView(state.update);const messages=state.messages||[];
+ modelView(state);distanceView(state);stampView(state);scoreView(state.score);updateView(state.update);const messages=state.messages||[];
  text('waiting',finished?'':state.waitingGit?'Git continues after you pass. Closing this tab leaves it waiting; Pause check stops it.':'Closing this tab leaves the check waiting. Use Pause check to stop.');
  const label=state.phase==='question'?'Question '+(state.progress.completed+1)+' of '+state.progress.total:state.phase==='working'?'Reviewing…':state.phase==='recovery'?'Review needs your decision':state.phase==='passed'?'Passed':state.phase==='paused'?'Paused':state.phase==='skipped'?'Skipped':state.phase==='error'?'Check stopped':'Waiting…';
  const retry=state.phase==='question'&&[...messages].reverse().find(item=>item.kind==='question')?.followUp;

@@ -15,11 +15,11 @@ import { recentOverrides } from '../src/overrides.js';
 import { textStream } from '../src/stream.js';
 
 const q = { id: 'duplicate', concept: 'idempotency', prompt: 'Can a retry duplicate the insert? <script>PRIVATE_SCRIPT</script>', choices: ['Yes', 'No'], expectedAnswer: 'PRIVATE_KEY', rationale: 'PRIVATE_RUBRIC', evidence: [{ path: 'app.js', reason: 'The insert is unconditional.' }] };
-async function fixture(t, { generate, grade, maxModelCalls = 20, validate = async () => {}, plans = [], interviewOptions = {} } = {}) {
+async function fixture(t, { generate, grade, maxModelCalls = 20, validate = async () => {}, plans = [], interviewOptions = {}, snapshotOverrides = {} } = {}) {
   const home = await mkdtemp(path.join(tmpdir(), 'sphinx-browser-'));
   const env = { SPHINX_HOME: path.join(home, 'state'), SPHINX_USER_HOME: home }, repoRoot = path.join(home, 'repo'); await mkdir(repoRoot);
   const config = { ...structuredClone(DEFAULT_CONFIG), maxModelCalls };
-  const snapshot = { id: 'a'.repeat(64), repoRoot, event: 'pre-push', target: { ref: 'refs/heads/main' }, files: ['app.js'], stats: { additions: 5, deletions: 1, files: 1 } };
+  const snapshot = { id: 'a'.repeat(64), repoRoot, event: 'pre-push', target: { ref: 'refs/heads/main' }, files: ['app.js'], stats: { additions: 5, deletions: 1, files: 1 }, ...snapshotOverrides };
   let generated = 0, graded = 0, opened = 0;
   const store = createSessionStore({ env, validate,
     generate: async (_s, _c, options) => { generated++; if (generate) return generate(generated, options); await options.beforeCall(); return { questions: [q] }; },
@@ -456,4 +456,17 @@ test('the page shows the question distance and saves a repository change only wh
   await assert.rejects(readFile(path.join(f.snapshot.repoRoot, '.sphinxconfig'), 'utf8'), { code: 'ENOENT' });
   await f.interview.close();
   assert.equal(JSON.parse(await readFile(path.join(f.snapshot.repoRoot, '.sphinxconfig'), 'utf8')).distance, 'low');
+});
+
+test('a push that may be a pull request offers posting the stamp there, and the Git hook gets the choice', async t => {
+  const pr = await fixture(t, { snapshotOverrides: { target: { remote: 'origin', url: 'https://github.com/acme/widgets.git', ref: 'refs/heads/feature' } } });
+  pr.present(); await pr.waitFor('question');
+  assert.deepEqual(pr.interview.state.stamp, { post: false, action: false });
+  const toggle = post => fetch(`${pr.interview.url}/action?stamp=1`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: new URL(pr.interview.url).origin, 'X-Sphinx-Token': new URL(pr.interview.url).pathname.slice(1) }, body: JSON.stringify({ post }) });
+  assert.equal((await toggle('yes')).status, 409);
+  assert.equal((await toggle(true)).status, 200);
+  assert.equal(pr.interview.stampChoice(pr.snapshot.id), true);
+  const main = await fixture(t);
+  main.present(); await main.waitFor('question');
+  assert.equal(main.interview.state.stamp, undefined, 'a push to main is not a pull request');
 });

@@ -34,7 +34,7 @@ const MODEL_FLAGS = ['preset', 'provider', 'model', 'small', 'medium', 'large', 
 const OPTIONS = {
   install: ['yes', 'repo', 'agents', ...MODEL_FLAGS, 'launch', 'no-launch', ...POLICY_FLAGS],
   activate: ['agents', 'json'],
-  init: ['yes', 'json', 'context', 'suggest', 'apply', ...POLICY_FLAGS], check: ['json', 'id', 'remote', 'branch', 'staged', 'retry-review'],
+  init: ['yes', 'json', 'context', 'suggest', 'apply', 'github-check', ...POLICY_FLAGS], check: ['json', 'id', 'remote', 'branch', 'staged', 'retry-review'],
   prepare: ['json', 'worker', 'retry'],
   answer: ['json', 'text'], explain: ['json'], dispute: ['json', 'text'], pending: ['json'],
   status: ['json'], config: ['json', 'distance', 'interface', ...MODEL_FLAGS], doctor: ['json'], auth: ['provider', 'base-url'], uninstall: ['repo'],
@@ -331,6 +331,7 @@ async function agentSetupCommand(values) {
 
 async function initCommand(initial) {
   if (initial.suggest || initial.apply !== undefined) return agentSetupCommand(initial);
+  if (initial['github-check']) return githubCheckCommand(initial);
   const { repo, config } = await repoConfig(), info = await repositoryConfigInfo(repo.root), terminal = ui();
   let values = initial;
   if (!initial.json) { terminal.banner(); terminal.section('Repository setup'); terminal.note(repo.root); }
@@ -366,6 +367,24 @@ async function initCommand(initial) {
   terminal.paragraph('.sphinxcontext.md tells the reviewer what this project is and what you want to be asked about, for example "don\'t ask about styling". Your preferences for every repository go in ~/.config/sphinx/context.md.');
   if (result.contextExcluded) terminal.note('.sphinxcontext.md is kept out of Git on this machine. To share it with your team, run git add -f .sphinxcontext.md.');
   terminal.note('This command does not install Git hooks. Check coverage with sphinx status.'); return 0;
+}
+
+// Adds the workflow that turns contributors' Sphinx stamps into a "Sphinx" check on PRs.
+async function githubCheckCommand(values) {
+  const { repo } = await repoConfig();
+  const { workflowTemplate } = await import('./github.js');
+  const { mkdir, writeFile } = await import('node:fs/promises');
+  const file = path.join(repo.root, '.github', 'workflows', 'sphinx.yml');
+  await mkdir(path.dirname(file), { recursive: true });
+  let created = true;
+  try { await writeFile(file, workflowTemplate(VERSION), { flag: 'wx' }); } catch (error) { if (error.code !== 'EEXIST') throw error; created = false; }
+  if (values.json) { json({ file, created }); return 0; }
+  const terminal = ui();
+  if (created) terminal.success(`Created ${path.relative(repo.root, file)}`); else terminal.note(`${path.relative(repo.root, file)} already exists and was kept.`);
+  terminal.paragraph('Commit and push it. Pull requests then show a "Sphinx" check: stamped with a summary once the author passes Sphinx for the latest commit, neutral until then.');
+  terminal.paragraph('To require it, set require: true in the workflow and add the "Sphinx" check to branch protection. Stamps are self-reported by contributors\u2019 machines, so treat it as a strong nudge, not proof.');
+  terminal.note('Contributors need Sphinx with pull request branches checked ("branches": ["*"]) and the GitHub CLI signed in.');
+  return 0;
 }
 
 function printSession(session, terminal = ui()) {
@@ -472,7 +491,7 @@ export function parseCommandLine(argv) {
     help: { type: 'boolean', short: 'h' }, version: { type: 'boolean', short: 'v' }, json: { type: 'boolean' }, yes: { type: 'boolean' }, repo: { type: 'boolean' }, staged: { type: 'boolean' },
     preset: { type: 'string' }, provider: { type: 'string' }, model: { type: 'string' }, small: { type: 'string' }, medium: { type: 'string' }, large: { type: 'string' }, level: { type: 'string' }, distance: { type: 'string' }, interface: { type: 'string' }, branches: { type: 'string' }, events: { type: 'string' }, agents: { type: 'string' }, remotes: { type: 'string' },
     remote: { type: 'string' }, branch: { type: 'string' }, id: { type: 'string' }, text: { type: 'string' }, 'allow-paid': { type: 'boolean' },
-    context: { type: 'string' }, suggest: { type: 'boolean' }, apply: { type: 'string' }, worker: { type: 'boolean' }, retry: { type: 'boolean' }, reason: { type: 'string' }, 'base-url': { type: 'string' }, 'cli-billing': { type: 'string' },
+    context: { type: 'string' }, 'github-check': { type: 'boolean' }, suggest: { type: 'boolean' }, apply: { type: 'string' }, worker: { type: 'boolean' }, retry: { type: 'boolean' }, reason: { type: 'string' }, 'base-url': { type: 'string' }, 'cli-billing': { type: 'string' },
     launch: { type: 'boolean' }, 'no-launch': { type: 'boolean' }, 'retry-review': { type: 'boolean' }, 'max-model-calls': { type: 'string' }, 'max-output-tokens': { type: 'string' },
   } });
   const [command, id] = positionals;
