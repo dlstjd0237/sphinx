@@ -9,7 +9,7 @@ export const PROVIDERS = Object.freeze(['openrouter', 'codex', 'claude', 'openai
 
 export const DEFAULT_CONFIG = {
   version: 1, enabled: true, provider: 'openrouter', model: 'openrouter/free',
-  level: 'standard', distance: 'mixed', mode: 'block', interface: 'auto', events: ['pre-push'],
+  level: 'standard', distance: 'mixed', audit: 'large', mode: 'block', interface: 'auto', events: ['pre-push'],
   branches: ['main', 'master'], remotes: ['*'], exclude: [],
   maxContextBytes: 100000, timeoutSeconds: 180, receiptHours: 24,
   maxModelCalls: null, maxOutputTokens: 4096, allowPaid: false, cliBilling: 'plan',
@@ -82,7 +82,7 @@ export function validateConfig(config) {
   for (const key of Object.keys(config)) if (!allowed.has(key)) fail(`unknown setting ${key}`);
   if (config.version !== 1) fail('version must be 1');
   for (const key of ['enabled', 'allowPaid', 'backgroundPreparation', 'workingContext']) if (typeof config[key] !== 'boolean') fail(`${key} must be boolean`);
-  for (const [key, values] of Object.entries({ provider: PROVIDERS, level: ['relaxed','standard','thorough'], distance: ['high','mixed','low'], interface: ['auto','browser','terminal'], mode: ['block'], cliBilling: ['plan','api'] })) {
+  for (const [key, values] of Object.entries({ provider: PROVIDERS, level: ['relaxed','standard','thorough'], distance: ['high','mixed','low'], audit: ['large','all'], interface: ['auto','browser','terminal'], mode: ['block'], cliBilling: ['plan','api'] })) {
     if (key === 'mode' && config.mode === 'advisory') fail('mode "advisory" was removed. Remove mode from your configuration; use sphinx yolo to bypass checks when urgent');
     if (!values.includes(config[key])) fail(`${key} must be ${values.join(', ')}`);
   }

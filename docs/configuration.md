@@ -121,6 +121,10 @@ The tier and your chosen depth set the maximum number of initial questions:
 
 These are ceilings, not quotas: the reviewer asks fewer questions when the evidence supports fewer distinct behaviors, and never pads. A wrong answer adds a replacement question for the same concept, so a check can ask more than the initial count. Changing the model does not change the question count.
 
+## Question audit
+
+After the reviewer writes questions, an independent model call can audit them against the code before you see them: it fixes answer keys that don't match the code, and rewrites questions that ask for trivia or reveal their own answers. By default (`"audit": "large"` in `config.json`) only large changes get that call; small and medium ones check their own questions in the same request, which saves one long model call (often 10–20 seconds) per check. Set `"audit": "all"` to audit every change. A decision to ask no questions is always audited, at any size.
+
 ## Model calls, tokens, and limits
 
 **Model calls have no default cap** (`maxModelCalls: null`, `agentMaxTurns: null`). Every request is counted: background investigation, compaction, the question audit, grading, replacement audits, and failed requests. The questionnaire shows calls and tokens as the check runs, plus cost when the provider reports it.

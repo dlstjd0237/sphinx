@@ -360,7 +360,11 @@ export function createSessionStore({ env = process.env, generate = generateAsses
         }
       } else if (result.followUp) {
         if (result.followUp.prompt.trim() === question.prompt.trim()) throw new Error('The evaluator repeated the question. Retry; no concept was marked complete.');
-        session.questions[session.index] = result.followUp;
+        // Keep IDs unique across the check, so nothing keyed by question ID can confuse two questions.
+        const taken = new Set(session.questions.filter((_, index) => index !== session.index).map(item => item.id));
+        let followUp = result.followUp;
+        for (let n = 2; taken.has(followUp.id); n++) followUp = { ...result.followUp, id: `${result.followUp.id}-${n}` };
+        session.questions[session.index] = followUp;
       } else if (result.verdict === 'incorrect' || learn) {
         throw new Error('The evaluator did not provide a transfer question. The concept remains pending.');
       }

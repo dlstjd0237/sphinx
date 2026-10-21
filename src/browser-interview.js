@@ -118,8 +118,10 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
   const settle = status => { transcript = transcript.map(item => item.role === 'human' && item.status === 'checking' ? { ...item, status } : item); };
   const showQuestion = visible => {
     const question = visible?.question;
-    if (!question || transcript.some(item => item.kind === 'question' && item.questionId === question.id)) return;
-    const number = visible.progress.completed + 1;
+    const number = visible?.progress ? visible.progress.completed + 1 : null;
+    // A question is new by its place as well as its ID: a follow-up's invented ID
+    // can match a later question's, which must still be shown.
+    if (!question || transcript.some(item => item.kind === 'question' && item.questionId === question.id && item.number === number)) return;
     say({ role: 'sphinx', kind: 'question', questionId: question.id, number, followUp: transcript.some(item => item.kind === 'question' && item.number === number), text: question.prompt, choices: question.choices || [] });
   };
   const streams = new Set();

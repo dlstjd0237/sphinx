@@ -937,3 +937,15 @@ test('mixed distance asks for both kinds of question; old checks without a setti
     assert.match(calls[0].input, pattern, String(distance));
   }
 });
+
+test('by default only large changes get a separate audit; small ones check their own questions', async t => {
+  const change = { ...snapshot, files: ['src/orders.js'], stats: { additions: 14, deletions: 9, files: 1 } };
+  for (const [audit, expectAudit] of [['large', false], ['all', true]]) {
+    const settings = { ...DEFAULT_CONFIG, maxModelCalls: 20, agentMaxTurns: 8, audit };
+    const runtime = evaluatorConfig(settings, selectRoute(change, settings));
+    let request; const audits = [];
+    const { evaluator } = await fixture(t, null, { openRouterTurn: nativeResponse({ questions: [question] }, args => { request = args; }), openRouter: async invocation => { audits.push(invocation); return { questions: [question], feedback: '' }; } });
+    await evaluator.generateAssessment(change, runtime).catch(() => {});
+    assert.equal(/No separate audit follows/.test(JSON.stringify(request.messages)), !expectAudit, audit);
+  }
+});

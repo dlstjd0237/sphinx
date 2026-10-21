@@ -496,3 +496,23 @@ test('questions ready raise one quiet macOS notification, with text passed as ar
   assert.deepEqual(call[1].slice(-2), ['T', 'repo"; do shell script "x'], 'text is data, never script');
   for (const options of [{ platform: 'linux', env: {} }, { platform: 'darwin', env: { SSH_TTY: '/dev/x' } }, { platform: 'darwin', env: { CI: '1' } }]) assert.equal(notifyDesktop({ title: 'T', message: 'M', ...options, spawnImpl: () => assert.fail('must not notify') }), false);
 });
+
+test('a follow-up whose ID matches a later question still lets that question appear', async t => {
+  const second = { ...q, id: 'q2', prompt: 'Second question: what about a restart?' };
+  const f = await fixture(t, { snapshotOverrides: { stats: { additions: 200, deletions: 40, files: 6 } },
+    generate: async (_n, options) => { await options.beforeCall(); return { questions: [q, second] }; },
+    grade: async (request, n) => n === 1
+      ? { verdict: 'incorrect', feedback: 'Not quite.', followUp: { ...q, id: 'q2', prompt: 'Follow-up for question one: a different retry?' } }
+      : { verdict: 'correct', feedback: '', followUp: null },
+  });
+  f.present();
+  let state = await f.waitFor('question');
+  await f.post('answer', { questionId: state.question.id, response: 'Wrong.' });
+  for (let i = 0; i < 300 && !/Follow-up for question one/.test(f.interview.state.question?.prompt || ''); i++) await delay(10);
+  state = f.interview.state;
+  await f.post('answer', { questionId: state.question.id, response: 'Right.' });
+  for (let i = 0; i < 300 && !/Second question/.test(f.interview.state.question?.prompt || ''); i++) await delay(10);
+  const shown = f.interview.state.messages.filter(item => item.kind === 'question').map(item => item.text);
+  assert.ok(shown.some(text => /Second question/.test(text)), `question 2 must be shown: ${JSON.stringify(shown)}`);
+  assert.notEqual(f.interview.state.messages.filter(item => item.kind === 'question').at(-2).questionId, f.interview.state.question.id, 'the follow-up was renamed apart from question 2');
+});

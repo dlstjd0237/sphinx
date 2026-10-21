@@ -64,10 +64,12 @@ async function fixture(t, { background = false } = {}) {
     const output = ok(process.execPath, [CLI, ...args]);
     // These gate tests control evaluation explicitly. The background E2E below
     // opts in separately, so detached workers never race unrelated assertions.
-    if (args[0] === 'install' && !args.includes('--repo') && !args.includes('--help') && !args.includes('-h') && !background) {
+    // Their scripted model also expects the independent audit on every change.
+    if (args[0] === 'install' && !args.includes('--repo') && !args.includes('--help') && !args.includes('-h')) {
       const file = path.join(env.SPHINX_HOME, 'config.json');
       const config = JSON.parse(readFileSync(file, 'utf8'));
-      config.backgroundPreparation = false;
+      if (!background) config.backgroundPreparation = false;
+      config.audit = 'all';
       writeFileSync(file, JSON.stringify(config));
     }
     return output;

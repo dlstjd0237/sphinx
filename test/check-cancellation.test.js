@@ -67,7 +67,7 @@ async function fixture(t, phase) {
   await writeFile(setup, `import { DEFAULT_CONFIG,saveConfig } from ${JSON.stringify(modulePath('config'))};
 import { pushSnapshots } from ${JSON.stringify(modulePath('git'))};
 import { createSessionStore } from ${JSON.stringify(modulePath('sessions'))};
-const config={...structuredClone(DEFAULT_CONFIG),provider:'claude',model:null,backgroundPreparation:false,models:Object.fromEntries(['small','medium','large'].map(tier=>[tier,{provider:'claude',model:null}]))};
+const config={...structuredClone(DEFAULT_CONFIG),audit:'all',provider:'claude',model:null,backgroundPreparation:false,models:Object.fromEntries(['small','medium','large'].map(tier=>[tier,{provider:'claude',model:null}]))};
 await saveConfig(config);
 const [snapshot]=await pushSnapshots({cwd:process.cwd(),remote:'origin',remoteUrl:'https://example.invalid/test.git',input:process.argv[2],config});
 const store=createSessionStore();await store.ensure(snapshot,config);

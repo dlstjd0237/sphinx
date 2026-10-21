@@ -483,7 +483,7 @@ ${auditPurpose === 'no-questions' ? `The reviewer proposes asking no questions b
     catch { fail('Assessment needs a valid depth and change tier.', 'INVALID_CONFIG'); }
     // A small change may need no questions at all; a larger one only when the person's preferences skip all of it.
     const allowNone = mayAskNothing(config, snapshot);
-    const small = config.changeTier === 'small', preferences = hasPreferences(snapshot);
+    const small = config.changeTier === 'small', preferences = hasPreferences(snapshot), separateAudit = config.audit !== 'large' || config.changeTier === 'large';
     const schema = {
       type: 'object', additionalProperties: false,
       properties: { questions: { type: 'array', minItems: allowNone ? 0 : 1, maxItems: budget, items: NEW_QUESTION_SCHEMA }, ...(allowNone ? { noQuestionReason: { type: 'string', maxLength: 300 } } : {}) },
@@ -496,10 +496,12 @@ A question answerable by copying a changed literal, status code, identifier, or 
 Audience: the person answering directed a coding agent to write this change and is about to ship it. Address them as "you" and the change as "your change". Ask what the shipped code will do, or what would break, in a concrete situation; never ask why "the developers" or "the authors" chose something or speculate about design intent.
 ${distanceText(config)}
 Test understanding, not reading comprehension. Assume the person can open the diff while answering: a question answered by locating and paraphrasing one or two lines is too easy. Ask for a mental model of how the pieces interact: predict the outcome of a concrete scenario the code does not spell out (a retry after a partial failure, two requests racing, a combination of settings, a caller the diff did not touch), explain what would break if a specific decision were reversed, or connect a change in one place to its effect somewhere else. The answer should follow from the inspected code without being written in it. Keep the scenario grounded in behavior the evidence establishes.
-Use evidence paths from exact workspace observations only. Follow relevant unchanged dependencies when needed before committing an answer.`;
+Use evidence paths from exact workspace observations only. Follow relevant unchanged dependencies when needed before committing an answer.${separateAudit ? '' : `\nNo separate audit follows for this change, so check each question yourself before finishing: its expected answer and acceptance criteria must match what the code actually does under the stated scenario, traced through branch conditions and early returns; it must not reveal its own answer, hinge on unstated conditions, or ask for trivia such as a literal value, CSS property, or status code; and it must ask the reader, as the person shipping the change, what the change does in a concrete situation.`}`;
     const provider = await providerFor(config, requestEnv);
     const validateAssessment = (response, paths) => validateAssessmentQuestions(response, paths, budget, { allowNone });
-    const audit = args => auditAssessment({ ...args, snapshot, env: requestEnv });
+    // Small and medium changes check their own questions (see the prompt above); a
+    // large change, and any decision to ask nothing, still gets the independent audit.
+    const audit = args => separateAudit || !args.questions?.length ? auditAssessment({ ...args, snapshot, env: requestEnv }) : Promise.resolve({ questions: args.questions });
     return runReviewer({ snapshot, config: { ...config, provider }, assessmentSchema: schema, assessmentInstructions: prompt, validateAssessment,
       runModel: args => runModel({ ...args, env: requestEnv }), nativeTools: provider === 'openrouter' || provider === 'openai',
       runToolModel: async args => (openRouterTurn ?? (await import('./openrouter.js')).callOpenRouterTurn)({ ...args, env: requestEnv }),
