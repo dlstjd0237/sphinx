@@ -31,7 +31,7 @@ export async function runGitGate({ event, args = [], input = '', cwd = process.c
   store: providedStore, readConfig = loadConfig, snapshotsFor: collectSnapshots = snapshotsFor,
   revalidate = revalidateSnapshot, present, readYolo = yoloStatus, logOverride = recordOverride,
   queue = queuePresentation, claim = claimPresentation, listRequests = listPresentations,
-  output = line => process.stderr.write(`${line}\n`), stamp = scheduleStamp, askInTerminal = runGitTerminalCheck,
+  output = line => process.stderr.write(`${line}\n`), stamp = scheduleStamp, askInTerminal = runGitTerminalCheck, watchMs = 1000,
 } = {}) {
   if (env.SPHINX_EVALUATOR === '1') return 0;
   signal?.throwIfAborted();
@@ -44,10 +44,15 @@ export async function runGitGate({ event, args = [], input = '', cwd = process.c
     for (const snapshot of snapshots) if (snapshot.event === 'pre-push') await dropContext({ repoRoot: snapshot.repoRoot, sourceRef: snapshot.sourceRef, env }).catch(() => {});
     await collectGarbage({ env });
   };
+  // Names what invalidated a snapshot: 'settings', 'source', or null if it still applies.
+  const staleness = async (snapshot, expected) => {
+    const current = await readConfig(snapshot.repoRoot, env);
+    if (policyHash(current) !== policyHash(expected)) return 'settings';
+    return await revalidate(snapshot, current, { env }) ? null : 'source';
+  };
   const validate = async (snapshot, expected) => {
     signal?.throwIfAborted();
-    const current = await readConfig(snapshot.repoRoot, env);
-    if (policyHash(current) !== policyHash(expected) || !(await revalidate(snapshot, current, { env }))) {
+    if (await staleness(snapshot, expected)) {
       throw new Error('The code, project context, or policy changed while Git was waiting. This operation was stopped; start a new Git operation for the updated change.');
     }
     signal?.throwIfAborted();
@@ -73,6 +78,14 @@ export async function runGitGate({ event, args = [], input = '', cwd = process.c
 
   const requests = [], skipped = new Set();
   const browser = present ? null : createBrowserInterview({ env, signal, output });
+  // A settings or source change makes the waiting checks inapplicable (sphinx
+  // pending stops listing them). Release Git promptly instead of leaving it
+  // blocked on a questionnaire that can no longer approve this operation.
+  const watcher = new AbortController();
+  const waitSignal = signal ? AbortSignal.any([signal, watcher.signal]) : watcher.signal;
+  const retry = event === 'pre-commit' ? 'git commit' : 'git push';
+  let checking = false, watch;
+  const discarded = () => watcher.signal.aborted && !signal?.aborted;
   try {
     // These requests belong to the waiting hook, not a post-tool callback.
     // Mark the whole batch before launching so sibling tools cannot open forms.
@@ -85,11 +98,31 @@ export async function runGitGate({ event, args = [], input = '', cwd = process.c
     }
     if (requests.length) output('Sphinx: Git is waiting for your answers in the local Sphinx questionnaire. It will continue automatically after you pass. Do not start another copy of this Git operation.');
     const interviewEnv = interviewEnvironment(cwd, env);
+    if (requests.length) watch = setInterval(async () => {
+      if (checking || watcher.signal.aborted) return;
+      checking = true;
+      try {
+        for (const snapshot of snapshots) {
+          if (skipped.has(snapshot.id)) continue;
+          const reason = await staleness(snapshot, config);
+          if (!reason) continue;
+          watcher.abort(Object.assign(new Error(reason === 'settings'
+            ? `Sphinx settings changed while Git was waiting, so this check was discarded. This Git operation was stopped; run ${retry} again to start a fresh check.`
+            : `The code or project context changed while Git was waiting, so this check was discarded. This Git operation was stopped; run ${retry} again for the updated change.`), { code: 'SPHINX_STALE' }));
+          break;
+        }
+      } catch {} // A transient read failure is retried on the next tick; the final validation still applies.
+      finally { checking = false; }
+    }, watchMs);
     for (let index = 0; index < requests.length; index++) {
       signal?.throwIfAborted();
       // Headless sessions (or interface: terminal) ask in the terminal first; the browser is the fallback.
-      let result = !present && prefersTerminal(config, { env }) ? await askInTerminal({ request: requests[index], env: interviewEnv, signal, cwd }) : null;
-      if (!result || result.status === 'unavailable') result = await (present || browser.present)({ request: requests[index], env: interviewEnv, signal });
+      let result;
+      try {
+        result = !present && prefersTerminal(config, { env }) ? await askInTerminal({ request: requests[index], env: interviewEnv, signal: waitSignal, cwd }) : null;
+        if (!result || result.status === 'unavailable') result = await (present || browser.present)({ request: requests[index], env: interviewEnv, signal: waitSignal });
+      } catch (error) { if (!discarded()) throw error; }
+      if (discarded()) { output(`Sphinx: ${watcher.signal.reason.message}`); return 1; }
       signal?.throwIfAborted();
       if (result?.status === 'unavailable') {
         // Native callbacks only run after Git exits. Keep that explicit fallback
@@ -131,6 +164,7 @@ export async function runGitGate({ event, args = [], input = '', cwd = process.c
     await finished();
     return 0;
   } finally {
+    clearInterval(watch);
     // A paused or cancelled batch must not reopen from an after-tool callback.
     for (const request of requests) await claim(request, { env });
     await browser?.close();
