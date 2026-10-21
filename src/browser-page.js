@@ -27,6 +27,7 @@ header{min-height:52px;border-bottom:1px solid var(--line);padding:8px 24px;disp
 .model-menu .confirm{display:block!important;margin:2px 10px 8px;padding:8px 10px;border-radius:8px;background:var(--paper);font-size:12.5px}.model-menu .confirm p{margin:0}.model-menu .confirm div{display:flex;gap:6px;margin-top:8px}.model-menu .menu-error{margin:4px 14px;color:var(--retry);font-size:12.5px}
 @media(max-width:600px){.model-menu{position:fixed;left:12px;right:12px;top:auto;bottom:12px;width:auto}}
 .stamp-row{display:flex;align-items:center;gap:8px;margin:0 0 6px;color:var(--ink);font-size:13px;cursor:pointer}.stamp-row input{accent-color:var(--amber);margin:0}.stamp-row[hidden]{display:none}
+.resume{display:flex;align-items:center;gap:10px;margin:4px 0 12px;padding:8px 10px 8px 14px;border:1px solid var(--line);border-radius:10px;background:#fff;max-width:36em}.resume[hidden]{display:none}.resume code{flex:1;font:13.5px var(--mono);overflow-wrap:anywhere}
 .plus{color:var(--add-ink)}.minus{color:var(--del-ink)}.facts .mono{font:600 12.5px var(--mono)}.scope-note{margin:2px 0 0;color:var(--muted);font-size:12px}#usage{color:var(--muted);font-weight:400;font-variant-numeric:tabular-nums}
 .tabs{display:none}.scope-short{display:none}
 .workspace{flex:1;min-height:0;display:grid;grid-template-columns:minmax(400px,46%) minmax(0,1fr);grid-template-rows:minmax(0,auto) minmax(0,1fr);grid-template-areas:"q files" "q diff"}
@@ -124,7 +125,7 @@ footer{flex-shrink:0;display:flex;flex-wrap:wrap;gap:2px 8px;padding:0 0 14px;co
 <div id="conversation" class="conversation" aria-label="Understanding check conversation">
 <ol id="messages" aria-label="Conversation"></ol>
 <p id="feedback" class="feedback" hidden></p><section id="question" hidden><p id="prompt" class="question"></p><ul id="choices" hidden></ul></section>
-<p id="message" class="message" role="status" hidden></p><div id="status" class="status" role="status" aria-live="polite">Connecting to your local checkpoint…</div><p id="recovery-reason" class="recovery-reason" hidden></p><div id="recovery" class="recovery" hidden></div>
+<p id="message" class="message" role="status" hidden></p><div id="resume" class="resume" hidden><code id="resume-command"></code><button id="resume-copy" class="quiet" type="button">Copy</button></div><div id="status" class="status" role="status" aria-live="polite">Connecting to your local checkpoint…</div><p id="recovery-reason" class="recovery-reason" hidden></p><div id="recovery" class="recovery" hidden></div>
 </div>
 <section id="evidence" class="evidence" aria-labelledby="evidence-title" hidden><h2 id="evidence-title">Code behind this question</h2><ul id="evidence-list"></ul><p id="evidence-note" class="pane-note"></p></section>
 <div id="composer" class="composer"><p id="error" class="error" role="alert" hidden></p>
@@ -213,6 +214,7 @@ $('model').onclick=()=>{if(menuOpen){closeMenu();return;}closeDistance();menuOpe
 document.onkeydown=event=>{if(event.key!=='Escape')return;if(menuOpen){closeMenu();$('model').focus();}if(distanceOpen){closeDistance();$('distance').focus();}};
 // A click inside the menu can rebuild it, detaching the clicked button; that is not a click outside.
 document.onclick=event=>{if(event.target?.isConnected===false)return;if(menuOpen&&!$('model-menu').contains?.(event.target)&&!$('model').contains?.(event.target))closeMenu();if(distanceOpen&&!$('distance-menu').contains?.(event.target)&&!$('distance').contains?.(event.target))closeDistance();};
+$('resume-copy').onclick=async()=>{try{await navigator.clipboard.writeText($('resume-command').textContent);$('resume-copy').textContent='Copied';setTimeout(()=>{$('resume-copy').textContent='Copy';},1500);}catch{}};
 // For a push that may be a pull request: whether to post the stamp there once you pass.
 function stampView(state){
  const s=state.stamp,row=$('stamp-row');row.hidden=!s||finished;if(row.hidden)return;
@@ -306,7 +308,8 @@ function render(state){
  const previous=current;current=state;finished=state.operationClosed||['passed','paused','error','skipped'].includes(state.phase);
  const repo=state.repoName||state.repoRoot?.split(/[\\\\/]/).filter(Boolean).at(-1),branch=state.target?.replace(/^refs\\/heads\\//,'');
  text('meta',repo||state.change?.header?.repository||'');$('meta').title=state.repoRoot||'';
- modelView(state);distanceView(state);stampView(state);scoreView(state.score);updateView(state.update);const messages=state.messages||[];
+ modelView(state);distanceView(state);stampView(state);
+ $('resume').hidden=!(state.phase==='paused'&&state.resume);if(state.resume)$('resume-command').textContent=state.resume;scoreView(state.score);updateView(state.update);const messages=state.messages||[];
  text('waiting',finished?'':state.waitingGit?'Git continues after you pass. Closing this tab leaves it waiting; Pause check stops it.':'Closing this tab leaves the check waiting. Use Pause check to stop.');
  const label=state.phase==='question'?'Question '+(state.progress.completed+1)+' of '+state.progress.total:state.phase==='working'?'Reviewing…':state.phase==='recovery'?'Review needs your decision':state.phase==='passed'?'Passed':state.phase==='paused'?'Paused':state.phase==='skipped'?'Skipped':state.phase==='error'?'Check stopped':'Waiting…';
  const retry=state.phase==='question'&&[...messages].reverse().find(item=>item.kind==='question')?.followUp;

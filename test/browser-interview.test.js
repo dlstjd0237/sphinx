@@ -145,7 +145,8 @@ test('Pause after a receipt was committed stops the interview without revoking o
   await f.post('answer', { response: 'Yes, the insert is repeated.' }); await committed;
   assert.equal(await f.store.approved(f.snapshot, f.config), true);
   const paused = await (await f.post('pause')).json();
-  assert.match(paused.message, /Progress is saved; the waiting Git operation was stopped/);
+  assert.match(paused.message, /progress is saved, and the waiting push was stopped\. To continue, run the same push again/);
+  assert.equal(paused.resume, 'git push', 'says how to continue');
   assert.equal((await done).status, 'pending');
   assert.doesNotMatch(f.interview.state.message, /No approval/);
   assert.equal(await f.store.approved(f.snapshot, f.config), true, 'An already committed receipt must remain saved');
@@ -469,4 +470,12 @@ test('a push that may be a pull request offers posting the stamp there, and the 
   const main = await fixture(t);
   main.present(); await main.waitFor('question');
   assert.equal(main.interview.state.stamp, undefined, 'a push to main is not a pull request');
+});
+
+test('a paused push shows the exact command that resumes it', async t => {
+  const f = await fixture(t, { snapshotOverrides: { sourceRef: 'refs/heads/master', target: { remote: 'origin', url: '/tmp/r.git', ref: 'refs/heads/master' } } });
+  f.present(); await f.waitFor('question');
+  await f.post('pause');
+  const paused = await f.waitFor('paused');
+  assert.equal(paused.resume, 'git push origin master');
 });

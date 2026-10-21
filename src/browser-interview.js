@@ -68,9 +68,12 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
 } = {}) {
   const token = randomBytes(32).toString('base64url'), nonce = randomBytes(24).toString('base64');
   let server, origin, url, opened = false, closed = false, active, skip, resolver, sequence = 0, waitingGit = false;
+  // A pause stops the waiting Git operation, and this page's server with it, so
+  // the only way back is to run it again. Say so, with the command when known.
+  let resumeCommand = null;
   const pauseMessage = () => waitingGit
-    ? 'Paused. Progress is saved; the waiting Git operation was stopped. You can close this tab.'
-    : 'Paused. Your progress and completed checkpoints are saved. You can close this tab.';
+    ? 'Paused. Your progress is saved, and the waiting push was stopped. To continue, run the same push again; Sphinx reopens at this question.'
+    : 'Paused. Your progress is saved. To continue, run the command below; Sphinx reopens at this question.';
   let state = { phase: 'waiting', operationClosed: false, revision: randomUUID(), sequence, message: 'Waiting for the checkpoint.', messages: [] };
   // The chat transcript for the current checkpoint lives only in this process.
   // It contains public questions, feedback, and the human's own text.
@@ -211,7 +214,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
     }
     if (data.action === 'pause') {
       active.abort(cancelled());
-      publish({ ...publicFields(state), phase: 'paused', message: pauseMessage() });
+      publish({ ...publicFields(state), phase: 'paused', message: pauseMessage(), ...(resumeCommand ? { resume: resumeCommand } : {}) });
       return send(res, 200, state);
     }
     if (!resolver || !resolver.allowed.includes(data.action)) return send(res, 409, { error: 'Wait for the current step to finish.' });
@@ -323,6 +326,11 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
       // Whether this repository chose its distance, or it comes from your machine-wide setting.
       const repoSets = await repositoryConfigInfo(request.repoRoot).then(info => info.exists && readJson(info.path)).then(local => Object.hasOwn(local || {}, 'distance')).catch(() => false);
       distance = { current: session.config?.distance ?? config.distance, next: null, scope: repoSets ? 'repository' : 'machine' };
+      const target = session.snapshot.target || {}, branch = name => String(name || '').replace(/^refs\/heads\//, '');
+      const source = branch(session.snapshot.sourceRef), destination = branch(target.ref);
+      resumeCommand = !waitingGit ? `sphinx check --id ${request.id}`
+        : session.snapshot.event === 'pre-commit' ? 'git commit'
+        : target.remote && destination ? `git push ${target.remote} ${source && source !== destination ? `${source}:${destination}` : destination}` : 'git push';
       stamp = null;
       if (await pullRequestPush(session.snapshot).catch(() => false)) {
         const action = await usesSphinxAction(request.repoRoot).catch(() => false);
@@ -446,7 +454,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
     } catch (error) {
       settle('not-graded');
       if (skip) return skipped();
-      publish({ ...publicFields(state), repoRoot: request.repoRoot, phase: localSignal.aborted ? 'paused' : 'error', message: localSignal.aborted ? pauseMessage() : 'The check could not finish. Saved progress and completed checkpoints are retained.', ...(localSignal.aborted ? {} : { error: error.message }) });
+      publish({ ...publicFields(state), repoRoot: request.repoRoot, phase: localSignal.aborted ? 'paused' : 'error', message: localSignal.aborted ? pauseMessage() : 'The check could not finish. Saved progress and completed checkpoints are retained.', ...(localSignal.aborted ? (resumeCommand ? { resume: resumeCommand } : {}) : { error: error.message }) });
       return { status: 'pending', id: request.id };
     } finally {
       clearTimeout(timer); requestSignal?.removeEventListener('abort', cancel); resolver?.reject(cancelled()); resolver = undefined;
