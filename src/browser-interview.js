@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import path from 'node:path';
 import { readStats, scoreSummary } from './stats.js';
 import { planProviders } from './evaluator.js';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -22,6 +23,20 @@ const ID = /^[a-f0-9]{64}$/u;
 const cancelled = () => Object.assign(new Error('Check paused. Progress is saved.'), { code: 'SPHINX_CANCELLED' });
 const equal = (a, b) => typeof a === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 const offLimits = env => env.SPHINX_EVALUATOR === '1' || (env.CI && !['false', '0'].includes(env.CI));
+
+/**
+ * A quiet macOS notification that questions are waiting, since the page opens
+ * in a background tab. Never steals focus; text travels as arguments, never as
+ * script. Skipped over SSH, in CI, and off macOS. Never throws.
+ */
+export function notifyDesktop({ title, message, env = process.env, platform = process.platform, spawnImpl = spawn } = {}) {
+  if (platform !== 'darwin' || offLimits(env) || env.SSH_CONNECTION || env.SSH_TTY) return false;
+  try {
+    const child = spawnImpl('/usr/bin/osascript', ['-e', 'on run argv\n  display notification (item 2 of argv) with title (item 1 of argv)\nend run', String(title), String(message)], { env, stdio: 'ignore', detached: false });
+    child.once?.('error', () => {});
+    return true;
+  } catch { return false; }
+}
 
 /** macOS has an explicit background-open flag. Elsewhere print the local URL;
  * do not guess at window-manager focus rules or invoke a foreground opener. */
@@ -63,7 +78,7 @@ function publicFields(state) {
 export function createBrowserInterview({ env = process.env, signal, timeoutMs = 25 * 60 * 1000,
   store: providedStore, readConfig = loadConfig, revalidate = revalidateSnapshot,
   reserve = claimCheckpointDialog, release = finishCheckpointDialog, waitForExisting = waitForCheckpointTerminal,
-  openBrowser = openQuestionnaireBrowser, output = line => process.stderr.write(`${line}\n`), logOverride = recordOverride, findPlans = planProviders,
+  openBrowser = openQuestionnaireBrowser, notify = notifyDesktop, output = line => process.stderr.write(`${line}\n`), logOverride = recordOverride, findPlans = planProviders,
   loadView = loadChangeView, checkUpdate = updateStatus, planUpdate = updatePlan, startUpdate = scheduleUpdate,
 } = {}) {
   const token = randomBytes(32).toString('base64url'), nonce = randomBytes(24).toString('base64');
@@ -395,9 +410,12 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
         },
       });
       if (!visible) return skip ? skipped() : { status: 'pending', id: request.id };
+      let notified = false;
       while (visible.status !== 'passed') {
         localSignal.throwIfAborted();
         showQuestion(visible); refreshEvidence(request.id);
+        // The page opened in a background tab; say once that questions are ready.
+        if (!notified) { notified = true; notify({ title: 'Sphinx needs your answers', message: [repoName || path.basename(request.repoRoot), String(session.snapshot.target?.ref || '').replace(/^refs\/heads\//, '')].filter(Boolean).join(' → '), env: operationEnv }); }
         const action = await waitForAction({ ...publicFields(visible), repoRoot: request.repoRoot, phase: 'question', ...(visible.browserError ? { error: visible.browserError } : {}) }, ['answer', 'learn', 'dispute']);
         try {
           await validate(session.snapshot, config);

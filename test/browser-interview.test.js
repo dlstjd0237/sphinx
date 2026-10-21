@@ -7,7 +7,7 @@ import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createBrowserInterview, openQuestionnaireBrowser } from '../src/browser-interview.js';
+import { createBrowserInterview, notifyDesktop, openQuestionnaireBrowser } from '../src/browser-interview.js';
 import { createSessionStore } from '../src/sessions.js';
 import { DEFAULT_CONFIG } from '../src/config.js';
 import { claimCheckpointDialog, checkpointTerminalStatus } from '../src/terminal-launch.js';
@@ -27,7 +27,7 @@ async function fixture(t, { generate, grade, maxModelCalls = 20, validate = asyn
   });
   await store.ensure(snapshot, config);
   const controller = new AbortController(), output = [];
-  const interview = createBrowserInterview({ env, signal: controller.signal, store, readConfig: async () => config, revalidate: async () => { await validate(); return true; }, openBrowser: async () => { opened++; return true; }, output: text => output.push(text), findPlans: async () => plans, checkUpdate: async () => null, ...interviewOptions });
+  const interview = createBrowserInterview({ notify: () => false, env, signal: controller.signal, store, readConfig: async () => config, revalidate: async () => { await validate(); return true; }, openBrowser: async () => { opened++; return true; }, output: text => output.push(text), findPlans: async () => plans, checkUpdate: async () => null, ...interviewOptions });
   const request = { id: snapshot.id, token: randomUUID(), repoRoot, delivery: 'hook', createdAt: Date.now() };
   const tasks = [];
   const present = (next = request) => { const task = interview.present({ request: next }); tasks.push(task); return task; };
@@ -220,7 +220,7 @@ test('Git cancellation during review aborts work, releases the reservation, and 
 
 test('CI and evaluator subprocesses never start a browser or model', async () => {
   for (const env of [{ CI: '1' }, { SPHINX_EVALUATOR: '1' }]) {
-    const interview = createBrowserInterview({ env, openBrowser: () => assert.fail('must not open'), reserve: () => assert.fail('must not reserve') });
+    const interview = createBrowserInterview({ notify: () => false, env, openBrowser: () => assert.fail('must not open'), reserve: () => assert.fail('must not reserve') });
     assert.equal((await interview.present({ request: { id: 'a'.repeat(64) } })).status, 'unavailable'); await interview.close();
   }
 });
@@ -305,7 +305,7 @@ test('the page serves the frozen change and verified question evidence without d
     grade: async request => { await request.beforeCall(); return { verdict: 'correct', feedback: 'Correct.', followUp: null }; } });
   await store.ensure(snapshot, config);
   const controller = new AbortController();
-  const interview = createBrowserInterview({ env, signal: controller.signal, store, readConfig: async () => config, revalidate: async () => true, openBrowser: async () => false, output: () => {} });
+  const interview = createBrowserInterview({ notify: () => false, env, signal: controller.signal, store, readConfig: async () => config, revalidate: async () => true, openBrowser: async () => false, output: () => {} });
   const done = interview.present({ request: { id: snapshot.id, token: randomUUID(), repoRoot: snapshot.repoRoot, delivery: 'hook', createdAt: Date.now() } });
   t.after(async () => { controller.abort(); await done.catch(() => {}); await interview.close(); });
   let first;
@@ -478,4 +478,21 @@ test('a paused push shows the exact command that resumes it', async t => {
   await f.post('pause');
   const paused = await f.waitFor('paused');
   assert.equal(paused.resume, 'git push origin master');
+});
+
+test('questions ready raise one quiet macOS notification, with text passed as arguments', async t => {
+  const sent = [];
+  const f = await fixture(t, { interviewOptions: { notify: message => { sent.push(message); return true; } } });
+  f.present(); const state = await f.waitFor('question');
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].title, 'Sphinx needs your answers');
+  assert.match(sent[0].message, /→ main$/);
+  await f.post('answer', { questionId: state.question.id, response: 'Yes, because the insert is unconditional.' });
+  assert.equal(sent.length, 1, 'once per check');
+  let call;
+  const spawnImpl = (...args) => { call = args; return new EventEmitter(); };
+  assert.equal(notifyDesktop({ title: 'T', message: 'repo"; do shell script "x', env: {}, platform: 'darwin', spawnImpl }), true);
+  assert.equal(call[0], '/usr/bin/osascript');
+  assert.deepEqual(call[1].slice(-2), ['T', 'repo"; do shell script "x'], 'text is data, never script');
+  for (const options of [{ platform: 'linux', env: {} }, { platform: 'darwin', env: { SSH_TTY: '/dev/x' } }, { platform: 'darwin', env: { CI: '1' } }]) assert.equal(notifyDesktop({ title: 'T', message: 'M', ...options, spawnImpl: () => assert.fail('must not notify') }), false);
 });

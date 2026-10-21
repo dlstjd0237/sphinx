@@ -215,6 +215,10 @@ document.onkeydown=event=>{if(event.key!=='Escape')return;if(menuOpen){closeMenu
 // A click inside the menu can rebuild it, detaching the clicked button; that is not a click outside.
 document.onclick=event=>{if(event.target?.isConnected===false)return;if(menuOpen&&!$('model-menu').contains?.(event.target)&&!$('model').contains?.(event.target))closeMenu();if(distanceOpen&&!$('distance-menu').contains?.(event.target)&&!$('distance').contains?.(event.target))closeDistance();};
 $('resume-copy').onclick=async()=>{try{await navigator.clipboard.writeText($('resume-command').textContent);$('resume-copy').textContent='Copied';setTimeout(()=>{$('resume-copy').textContent='Copy';},1500);}catch{}};
+// A background tab says when it is waiting on you.
+const waitingOnYou=()=>['question','recovery'].includes(current?.phase)&&!finished;
+function titleView(){document.title=waitingOnYou()&&document.visibilityState==='hidden'?'● Sphinx: your answers needed':'Sphinx — understanding check';}
+document.onvisibilitychange=titleView;
 // For a push that may be a pull request: whether to post the stamp there once you pass.
 function stampView(state){
  const s=state.stamp,row=$('stamp-row');row.hidden=!s||finished;if(row.hidden)return;
@@ -308,7 +312,7 @@ function render(state){
  const previous=current;current=state;finished=state.operationClosed||['passed','paused','error','skipped'].includes(state.phase);
  const repo=state.repoName||state.repoRoot?.split(/[\\\\/]/).filter(Boolean).at(-1),branch=state.target?.replace(/^refs\\/heads\\//,'');
  text('meta',repo||state.change?.header?.repository||'');$('meta').title=state.repoRoot||'';
- modelView(state);distanceView(state);stampView(state);
+ modelView(state);distanceView(state);stampView(state);titleView();
  $('resume').hidden=!(state.phase==='paused'&&state.resume);if(state.resume)$('resume-command').textContent=state.resume;scoreView(state.score);updateView(state.update);const messages=state.messages||[];
  text('waiting',finished?'':state.waitingGit?'Git continues after you pass. Closing this tab leaves it waiting; Pause check stops it.':'Closing this tab leaves the check waiting. Use Pause check to stop.');
  const label=state.phase==='question'?'Question '+(state.progress.completed+1)+' of '+state.progress.total:state.phase==='working'?'Reviewing…':state.phase==='recovery'?'Review needs your decision':state.phase==='passed'?'Passed':state.phase==='paused'?'Paused':state.phase==='skipped'?'Skipped':state.phase==='error'?'Check stopped':'Waiting…';
