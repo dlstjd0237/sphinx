@@ -15,6 +15,8 @@ const plain = text => String(text ?? '').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
 const PROVIDERS = { openrouter: 'OpenRouter', openai: 'Endpoint', claude: 'Claude Code', codex: 'Codex' };
 const routeText = route => route?.provider ? [PROVIDERS[route.provider] || route.provider, route.model].filter(Boolean).join(' ') : '';
 const count = n => Number(n || 0).toLocaleString('en-US');
+// A waiting Git operation in the same words as the browser page.
+const words = event => event === 'pre-commit' ? ['commit', 'Commit'] : ['push', 'Push'];
 
 /** One status line that redraws in place on a TTY, and prints once otherwise. */
 export function createSpinner(stream, style) {
@@ -46,6 +48,13 @@ function scoreLine(score, style) {
   const value = score.calibrating ? style.muted(`warming up · ${score.needed} to go`) : style.strong(`${score.accuracy}%`);
   const extra = !score.calibrating && score.streak > 1 ? style.muted(` · ${score.streak} in a row`) : '';
   return `  ${style.muted('Your understanding')}  ${dots}  ${value}${extra}`;
+}
+
+/** A line led by a symbol; wrapped lines keep clear of it. */
+function mark(terminal, symbol, text) {
+  const [first, ...rest] = wrapText(text, terminal.width - 4).split('\n');
+  terminal.line(`  ${symbol} ${first}`);
+  for (const line of rest) terminal.line(`    ${line}`);
 }
 
 /** A quoted block with a left rule, wrapped to the terminal. */
@@ -83,23 +92,28 @@ function printQuestion(terminal, state, { note }) {
 
 function commandsLine(terminal, { waitingGit }) {
   const { style } = terminal;
-  const items = ['/hint', '/learn', '/dispute <reason>', ...(waitingGit ? ['/skip'] : []), '/quit'];
+  const items = ['/hint', '/learn', '/dispute <reason>', ...(waitingGit ? ['/skip', '/stop'] : ['/quit'])];
   terminal.line(style.muted(`  Enter to send · ${items.join('  ')}`));
 }
 
 /**
- * Run the check in this terminal. Resolves 0 when passed, 1 when paused or
- * quit, and 3 when the human skipped a waiting Git operation.
+ * Run the check in this terminal. Resolves 0 when passed, 1 when paused,
+ * quit, or stopped before a pass, 3 when the human skipped a waiting Git
+ * operation, and 4 when they passed and then stopped that waiting operation.
+ * With more checks to follow in the same push, a pass does not ask yet.
  */
-export async function runTerminalCheck({ store, session, config, ask, terminal: base, stream = process.stdout, signal, waitingGit = false, planProviders = [], validate, choose, skip, env = process.env }) {
+export async function runTerminalCheck({ store, session, config, ask, terminal: base, stream = process.stdout, signal, waitingGit = false, more = false, planProviders = [], validate, choose, skip, env = process.env }) {
   // Lines keep their own indentation; the shared helpers would rewrap it away.
   const terminal = { ...base, line: text => stream.write(`${text}\n`), note: text => stream.write(`${base.style.muted(`  ${text}`)}\n`), warning: text => stream.write(`  ${base.style.amber('!')} ${text}\n`) };
   const { style } = terminal;
   const spinner = createSpinner(stream, style);
-  const repoRoot = session.snapshot.repoRoot;
+  const repoRoot = session.snapshot.repoRoot, event = session.snapshot.event, [op, Op] = words(event);
+  // While Git waits, quitting stops it; /quit stays as an alias of /stop.
+  const stop = waitingGit ? '/stop' : '/quit';
   const score = async () => scoreSummary(await readStats(repoRoot, env));
   printHeader(terminal, { session, score: await score().catch(() => null) });
-  terminal.line(style.muted(wrapText('Open-book: look at the code whenever it helps, then explain what it does in your own words.', terminal.width, '  ')));
+  // A held pass has nothing left to answer.
+  if (!session.held) terminal.line(style.muted(wrapText('Open-book: look at the code whenever it helps, then explain what it does in your own words.', terminal.width, '  ')));
 
   const withSpinner = async (label, operation) => {
     spinner.start(label);
@@ -109,8 +123,10 @@ export async function runTerminalCheck({ store, session, config, ask, terminal: 
   try {
     state = await prepareInteractiveCheck({
       config, signal, waitingGit, planProviders, ui: terminal, choose,
-      start: () => withSpinner(session.questions?.length ? 'Loading prepared questions' : `Reviewing the change with ${routeText(session.route)}`, () => store.start(session.id, config, {
-        signal, onProgress: text => spinner.update(`Reviewing · ${text}`),
+      // A pass made while Git waits is saved held: only the Git gate releases it, after
+      // continue, so a window that outlives the gate cannot let a retry through.
+      start: () => withSpinner(session.held ? 'Loading your earlier pass' : session.questions?.length ? 'Loading prepared questions' : `Reviewing the change with ${routeText(session.route)}`, () => store.start(session.id, config, {
+        signal, hold: waitingGit, onProgress: text => spinner.update(`Reviewing · ${text}`),
       })),
       inspect: async () => store.public(await store.read(session.id)),
       authorizeMore: () => store.retryReview(session.id, config, { signal }),
@@ -119,9 +135,15 @@ export async function runTerminalCheck({ store, session, config, ask, terminal: 
   } finally { spinner.stop(); }
   signal?.throwIfAborted();
   if (!state) return 1;
+  // Held when this check opened, the pass was made for a push or commit that did not go through:
+  // only the choice to continue remains. (A pass made here is held too, until Git sees continue.)
+  if (state.status === 'passed' && session.held) {
+    terminal.line(''); mark(terminal, style.green('✓'), `${state.noQuestionReason ? 'This change needed no questions' : 'You passed this change'} earlier, but that ${op} did not go through.`);
+    return finish(terminal, { waitingGit, more, ask, event });
+  }
   if (state.status === 'passed' && state.noQuestionReason) {
-    terminal.line(''); terminal.line(`  ${style.green('✓')} No questions needed: ${plain(state.noQuestionReason)}`);
-    return finish(terminal, { waitingGit });
+    terminal.line(''); mark(terminal, style.green('✓'), `No questions needed: ${plain(state.noQuestionReason)}`);
+    return finish(terminal, { waitingGit, more, ask, event });
   }
 
   let shownId = null, shownNumber = 0, shownDraft = null;
@@ -143,7 +165,13 @@ export async function runTerminalCheck({ store, session, config, ask, terminal: 
     const answer = plain(await ask(`  ${style.amber('›')} `)).trim() || draftLine || '';
     signal?.throwIfAborted();
     if (!answer) continue;
-    if (answer === '/quit') { terminal.line(''); terminal.note('Progress saved. Run sphinx check when you are ready to continue.'); return 1; }
+    if (answer === '/quit' || answer === stop) {
+      terminal.line('');
+      if (!waitingGit) { terminal.note('Progress saved. Run sphinx check when you are ready to continue.'); return 1; }
+      mark(terminal, style.amber('‖'), `${Op} stopped. It did not go through; your progress is saved.`);
+      terminal.line(style.muted(wrapText(`Run git ${op} again to continue; Sphinx reopens at this question.`, terminal.width, '    ')));
+      return 1;
+    }
     if (answer === '/hint') { await printHint(terminal, store, session.id, state.question.id); continue; }
     if (answer === '/skip') {
       if (!waitingGit || !skip) { terminal.warning('Skipping is only available while a Git operation is waiting.'); continue; }
@@ -155,16 +183,16 @@ export async function runTerminalCheck({ store, session, config, ask, terminal: 
     }
     const dispute = answer.startsWith('/dispute '), learn = answer === '/learn';
     if (answer === '/dispute') { terminal.warning('Add a reason: /dispute <what is ambiguous or unsupported>'); continue; }
-    if (answer.startsWith('/') && !dispute && !learn) { terminal.warning('Use /hint, /learn, /dispute <reason>, /quit, or type your answer.'); continue; }
+    if (answer.startsWith('/') && !dispute && !learn) { terminal.warning(`Use /hint, /learn, /dispute <reason>, ${stop}, or type your answer.`); continue; }
     const previous = state;
     try {
-      state = await withSpinner(learn ? 'Preparing an explanation' : dispute ? 'Reviewing the question' : 'Checking your reasoning', () => store.answer(session.id, learn ? LEARN : dispute ? answer.slice(9) : answer, config, { dispute, learn, expectedQuestionId: previous.question.id, signal }));
+      state = await withSpinner(learn ? 'Preparing an explanation' : dispute ? 'Reviewing the question' : 'Checking your reasoning', () => store.answer(session.id, learn ? LEARN : dispute ? answer.slice(9) : answer, config, { dispute, learn, expectedQuestionId: previous.question.id, signal, hold: waitingGit }));
     } catch (error) {
       // Like the browser: a failed grade leaves the same question open. Only cancelling ends the check.
       if (signal?.aborted || ['SPHINX_CANCELLED', 'EVALUATOR_CANCELLED'].includes(error?.code) || error?.name === 'AbortError') throw error;
       terminal.line('');
       terminal.warning(`That didn't go through: ${plain(error.message)}`);
-      terminal.note('Your progress is kept. Try again, or /quit to stop here.');
+      terminal.note(`Your progress is kept. Try again, or ${stop} to stop here.`);
       state = previous;
       continue;
     }
@@ -178,11 +206,29 @@ export async function runTerminalCheck({ store, session, config, ask, terminal: 
   const final = await score().catch(() => null);
   const line = scoreLine(final, style);
   if (line) terminal.line(line);
-  return finish(terminal, { waitingGit });
+  return finish(terminal, { waitingGit, more, ask, event });
 }
 
-function finish(terminal, { waitingGit }) {
-  terminal.line(terminal.style.muted(waitingGit ? '  Approval saved. Git is continuing.' : '  Approval saved for this exact change and destination. A waiting Git operation can now continue.'));
+// After a pass, a waiting Git operation goes through only when the human says so.
+async function finish(terminal, { waitingGit, more, ask, event }) {
+  const { style } = terminal, [op, Op] = words(event);
+  if (waitingGit && !more) {
+    terminal.line('');
+    terminal.line(`  ${style.strong(`Continue the ${op}?`)}`);
+    terminal.line(style.muted(wrapText(`continue: the ${op} goes through. stop: it does not go through. Your pass is saved, so the next ${op} of this change asks only whether to continue.`, terminal.width, '  ')));
+    for (;;) {
+      const choice = plain(await ask(`  ${style.amber('›')} continue / stop: `)).trim().toLowerCase();
+      if (['continue', 'c', 'y', 'yes', 'proceed'].includes(choice)) break;
+      if (['stop', 's', 'n', 'no', '/stop', '/quit'].includes(choice)) {
+        terminal.line('');
+        mark(terminal, style.amber('‖'), `${Op} stopped. It did not go through; your pass is saved.`);
+        terminal.line('');
+        return 4;
+      }
+      terminal.warning('Type continue or stop.');
+    }
+  }
+  terminal.line(style.muted(wrapText(!waitingGit ? 'Approval saved for this exact change and destination. A waiting push or commit goes through once you choose Continue in its questionnaire.' : more ? `Approval saved. This ${op} has another destination to check next.` : 'Approval saved. Git is continuing.', terminal.width, '  ')));
   terminal.line('');
   return 0;
 }

@@ -130,6 +130,7 @@ test('CLI blocks a push, conducts the learning loop, reuses completion, and reje
   assert.equal(passed.status, 'passed');
   assert.equal(passed.progress.completed, 1);
   assert.equal(Object.hasOwn(passed, 'question'), false);
+  assert.match(f.cli('answer', first.id, '--text', 'Again.'), /Approval saved for this exact change and destination\. A waiting push or commit\s+goes through once you choose Continue in its questionnaire\./);
   const sessionPath = path.join(f.env.SPHINX_HOME, 'sessions', `${first.id}.json`);
   assert.equal((await stat(sessionPath)).mode & 0o777, 0o600);
   f.git('push', 'origin', 'main');
@@ -245,6 +246,8 @@ test('interactive CLI stays open after review failure until the human pauses or 
   resumed.child.stdin.write('1\n');
   await resumed.waitFor('› ');
   resumed.child.stdin.write('No. The existing ID is rejected before insertion.\n');
+  await resumed.waitFor('continue / stop');
+  resumed.child.stdin.write('continue\n');
   assert.equal(await resumed.done, 0);
   assert.match(resumed.output(), /Understanding check complete/);
   const record = JSON.parse(await readFile(path.join(f.env.SPHINX_HOME, 'sessions', `${id}.json`), 'utf8'));
