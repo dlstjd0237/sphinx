@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { applyRepositorySetup, CONTEXT_TODO, SETUP_NUDGE, suggestRepositorySetup } from '../src/repo-setup.js';
-import { PROJECT_CONTEXT_TEMPLATE } from '../src/repo-context.js';
+import { PROJECT_CONTEXT_TEMPLATE, contextWithDescription } from '../src/repo-context.js';
 import { agentHook } from '../src/agent.js';
 import { cursorAgentHook, TERMINAL_GUIDANCE } from '../src/lifecycle-integrations.js';
 
@@ -104,6 +104,18 @@ test('suggest respects existing policy, context, and ignore rules, and never rea
   assert.deepEqual(template.detected.contextFrom, ['package.json']);
 });
 
+test('suggest never reads project files through symlinks, and refuses a symlinked context', async t => {
+  const f = await fixture(t);
+  await f.write('.env', 'The production billing database password is shared with the whole team here.\n');
+  const link = name => symlink(path.join(f.repo, '.env'), path.join(f.repo, name));
+  try { await link('README.md'); } catch (error) { if (error.code !== 'EPERM') throw error; return t.skip('this account may not create symlinks'); }
+  const proposal = await suggestRepositorySetup({ repoRoot: f.repo, env: f.env });
+  assert.doesNotMatch(proposal.context, /billing database/);
+  assert.deepEqual(proposal.detected.contextFrom, []);
+  await link('.sphinxcontext.md');
+  await assert.rejects(suggestRepositorySetup({ repoRoot: f.repo, env: f.env }), /Refusing to edit a symlink/);
+});
+
 test('suggest drops derived text that looks like a credential', async t => {
   const f = await fixture(t);
   await f.write('package.json', JSON.stringify({ name: 'leaky', description: 'Uses token = ghp_abcdefghijklmnopqrstuvwxyz0123456789' }));
@@ -148,6 +160,13 @@ test('apply merges ignore lines, replaces only an untouched context template, an
   assert.deepEqual(JSON.parse(await readFile(path.join(f.repo, '.sphinxconfig'), 'utf8')).branches, ['main']);
   assert.match(await readFile(path.join(f.repo, '.sphinxcontext.md'), 'utf8'), /## About this project\nA ledger service\.\n\n## What to ask about/);
   assert.equal(await readFile(path.join(f.repo, '.sphinxignore'), 'utf8'), '# mine\nprivate/\n\n# Added by sphinx init --apply\ndist/\nbuild/\n');
+});
+
+test('apply replaces an untouched context template whole, leaving no tail of the longer old file', async t => {
+  const f = await fixture(t);
+  await f.write('.sphinxcontext.md', PROJECT_CONTEXT_TEMPLATE);
+  await applyRepositorySetup({ repoRoot: f.repo, proposal: { context: 'A ledger service.' }, env: f.env });
+  assert.equal(await readFile(path.join(f.repo, '.sphinxcontext.md'), 'utf8'), contextWithDescription('A ledger service.'));
 });
 
 test('invalid proposals list every actionable problem and write nothing', async t => {

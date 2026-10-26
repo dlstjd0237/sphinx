@@ -47,10 +47,24 @@ export function getPaths(env = process.env) {
   };
 }
 
+/**
+ * Open a file without following a symlink at its last component; a symlink fails with code ELOOP.
+ * Windows has no O_NOFOLLOW (`nofollow` is undefined there) and would follow the link, so lstat
+ * decides before the open instead. That check is not atomic with the open, but it stops a
+ * symlink a repository commits, which is the threat. A missing file is left to the open, which
+ * creates it for O_CREAT callers. Tests pass `{ nofollow: 0 }` to run the fallback on any platform.
+ */
+export async function openNoFollow(file, flags, mode, { nofollow = constants.O_NOFOLLOW } = {}) {
+  if (nofollow) return open(file, flags | nofollow, mode);
+  const info = await lstat(file).catch(error => { if (error.code !== 'ENOENT') throw error; });
+  if (info?.isSymbolicLink()) throw Object.assign(new Error(`Refusing to open a symlink: ${file}`), { code: 'ELOOP' });
+  return open(file, flags, mode);
+}
+
 export async function readJson(file, fallback) {
   let handle;
   try {
-    handle=await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+    handle=await openNoFollow(file, constants.O_RDONLY);
     const info=await handle.stat();
     if(!info.isFile() || info.size>4*1024*1024)throw new Error('not a regular JSON file or exceeds 4 MiB');
     const raw=await handle.readFile('utf8');

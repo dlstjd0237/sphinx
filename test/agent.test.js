@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { agentHook } from '../src/agent.js';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -55,6 +55,17 @@ test('Claude session setup tags future shell commands without reading or replaci
   assert.equal(await readFile(file, 'utf8'), saved, 'Unexpected session IDs cannot inject shell syntax');
   await agentHook({ agent: 'claude', input: { hook_event_name: 'SessionStart', session_id: 'evaluator' }, env: { ...env, SPHINX_EVALUATOR: '1' } });
   assert.equal(await readFile(file, 'utf8'), saved);
+});
+
+test('Claude session setup never appends through a symlinked environment file', async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'sphinx-agent-env-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, 'target.sh'), link = path.join(directory, 'session.sh');
+  await writeFile(target, 'export EXISTING=value\n');
+  try { await symlink(target, link); } catch (error) { if (error.code !== 'EPERM') throw error; return t.skip('this account may not create symlinks'); }
+  const input = { hook_event_name: 'SessionStart', session_id: 'test-session-123' };
+  await assert.rejects(agentHook({ agent: 'claude', input, env: { CLAUDE_ENV_FILE: link } }), { code: 'ELOOP' });
+  assert.equal(await readFile(target, 'utf8'), 'export EXISTING=value\n');
 });
 
 test('post-tool hooks need no MCP server: silent with nothing queued, and never fail the agent', async () => {

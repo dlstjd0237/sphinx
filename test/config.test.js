@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { constants } from 'node:fs';
 import { mkdir, mkdtemp, open, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { DEFAULT_CONFIG, getPaths, loadConfig, openRouterKey, policyHash, renameWithRetry, repositoryConfigInfo, saveConfig, saveOpenRouterKey, stableStringify, validateConfig, writeJson } from '../src/config.js';
+import { DEFAULT_CONFIG, getPaths, loadConfig, openNoFollow, openRouterKey, policyHash, readJson, renameWithRetry, repositoryConfigInfo, saveConfig, saveOpenRouterKey, stableStringify, validateConfig, writeJson } from '../src/config.js';
 
 async function fixture(t) {
   const directory = await mkdtemp(join(tmpdir(), 'sphinx-config-test-'));
@@ -314,4 +315,49 @@ test('aborting a save that waits on an open handle stops it with the old file ke
   } finally { await reader.close(); }
   assert.equal(await readFile(target, 'utf8'), '{}\n');
   assert.deepEqual((await readdir(directory)).filter(name => name.endsWith('.tmp')), []);
+});
+
+// Creating a symlink needs Developer Mode or elevation on Windows; skip the test where the account may not.
+async function linkOrSkip(t, target, link) {
+  try { await symlink(target, link); return true; } catch (error) {
+    if (error.code !== 'EPERM') throw error;
+    t.skip('this account may not create symlinks');
+    return false;
+  }
+}
+
+test('openNoFollow refuses a symlink with ELOOP where the platform has no O_NOFOLLOW, and never creates through one', async t => {
+  const { directory } = await fixture(t);
+  const target = join(directory, 'target.txt'), link = join(directory, 'link.txt'), dangling = join(directory, 'dangling.txt'), beyond = join(directory, 'beyond.txt');
+  await writeFile(target, 'PRIVATE_TARGET');
+  if (!await linkOrSkip(t, target, link) || !await linkOrSkip(t, beyond, dangling)) return;
+  // { nofollow: 0 } is how Windows runs: with no O_NOFOLLOW to pass, lstat decides before the open.
+  await assert.rejects(openNoFollow(link, constants.O_RDONLY, undefined, { nofollow: 0 }), { code: 'ELOOP', message: `Refusing to open a symlink: ${link}` });
+  await assert.rejects(openNoFollow(dangling, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT, 0o600, { nofollow: 0 }), { code: 'ELOOP' });
+  await assert.rejects(stat(beyond), { code: 'ENOENT' }, 'a creating open must not create the target of a dangling link');
+  // Without options each platform refuses in its own way: the kernel with O_NOFOLLOW, or the same lstat check.
+  await assert.rejects(openNoFollow(link, constants.O_RDONLY), { code: 'ELOOP' });
+});
+
+test('a JSON file that is a symlink is refused by its error code, and a regular one still reads', async t => {
+  const { directory } = await fixture(t);
+  const target = join(directory, 'target.json'), link = join(directory, 'link.json');
+  await writeFile(target, '{"secret":"PRIVATE_TARGET"}');
+  assert.deepEqual(await readJson(target), { secret: 'PRIVATE_TARGET' });
+  if (!await linkOrSkip(t, target, link)) return;
+  await assert.rejects(readJson(link, {}), { message: `Cannot read ${link}: ELOOP` });
+});
+
+test('openNoFollow opens a regular file, and leaves a missing file to open so only O_CREAT creates it', async t => {
+  const { directory } = await fixture(t);
+  const file = join(directory, 'regular.txt'), created = join(directory, 'created.txt');
+  await writeFile(file, 'content');
+  for (const options of [{ nofollow: 0 }, undefined]) {
+    const handle = await openNoFollow(file, constants.O_RDONLY, undefined, options);
+    try { assert.equal(await handle.readFile('utf8'), 'content'); } finally { await handle.close(); }
+    await assert.rejects(openNoFollow(created, constants.O_RDONLY, undefined, options), { code: 'ENOENT' });
+  }
+  const handle = await openNoFollow(created, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT, 0o600, { nofollow: 0 });
+  try { await handle.writeFile('new'); } finally { await handle.close(); }
+  assert.equal(await readFile(created, 'utf8'), 'new');
 });

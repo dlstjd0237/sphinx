@@ -1,6 +1,6 @@
 import { constants } from 'node:fs';
+import { openNoFollow } from './config.js';
 import { browserHandoff } from './lifecycle-integrations.js';
-import { open } from 'node:fs/promises';
 import { setupNudge } from './repo-setup.js';
 
 /** Session setup only. Git and native lifecycle hooks control the actual checkpoint. */
@@ -27,7 +27,7 @@ export async function agentHook({ agent, event, input = '', env = process.env })
   if (agent === 'claude' && env.CLAUDE_ENV_FILE && /^[A-Za-z0-9_-]{1,200}$/.test(payload?.session_id || '')) {
     // Claude's documented SessionStart environment channel tags later Bash calls,
     // including `git -C` and `cd`, without reading the command or its output.
-    const file = await open(env.CLAUDE_ENV_FILE, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW || 0), 0o600);
+    const file = await openNoFollow(env.CLAUDE_ENV_FILE, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT, 0o600);
     try { await file.writeFile(`\nexport SPHINX_CLAUDE_SESSION='${payload.session_id}'\n`); }
     finally { await file.close(); }
   }
