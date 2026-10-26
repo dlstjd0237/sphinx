@@ -21,6 +21,23 @@ export function msys2Quote(arg) {
   return `"${arg.replace(/[\\"]/g, '\\$&')}"`;
 }
 
+// A shell function for Git's sh: `run_hook <hook> <args...>` replaces the shell with the hook, started the way Git for Windows
+// starts one (compat/mingw.c parse_interpreter). From a `#!` line Git keeps only the interpreter's file name (after the last
+// `/`, else the last `\`), looks it up on PATH and drops its options. MSYS2's own exec would need the whole path to exist in
+// Git's tree and would honor the options, so `#!/usr/bin/node` and `#!C:/Program Files/nodejs/node.exe` would fail and
+// `#!/bin/sh -e` would behave differently. A line ends at CR as well as LF. A hook without a `#!` line is run as it is.
+// ponytail: more lenient than Git, which cannot start a hook whose `#!` line has no `/` or `\`, a tab before its options, or no
+// line end within its first 259 bytes. Such a hook runs here anyway; refuse them too only if failing exactly like Git matters.
+export const RUN_HOOK = `run_hook() {
+  IFS= read -r sphinx_shebang <"$1" || :
+  case $sphinx_shebang in
+    '#!'*/*) sphinx_shebang=\${sphinx_shebang##*/} ;;
+    '#!'*\\\\*) sphinx_shebang=\${sphinx_shebang##*\\\\} ;;
+    *) exec "$@" ;;
+  esac
+  exec "\${sphinx_shebang%%[[:cntrl:] ]*}" "$@"
+}`;
+
 // Windows searches the current directory before PATH for a bare command name. Sphinx runs `git` with the
 // repository as cwd, so a repository that commits a git.exe would get it run. The switch is read from the
 // spawning process's own environment, so it has to be set in `process.env`; a child's env option is too late.

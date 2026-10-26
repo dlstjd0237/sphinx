@@ -5,11 +5,11 @@ import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { install, uninstall, doctor, dispatchHook, detectAgents, checkAgentPlatform, WINDOWS_AGENT_HINT } from '../src/install.js';
 import { getPaths } from '../src/config.js';
 import { lifecycleHome } from '../src/lifecycle-integrations.js';
-import { msys2Quote } from '../src/windows.js';
+import { RUN_HOOK, msys2Quote } from '../src/windows.js';
 
 async function fixture(t, { prefix = "sphinx install ' " } = {}) {
   const base = await mkdtemp(path.join(tmpdir(), prefix));
@@ -35,11 +35,11 @@ const json = async file => JSON.parse(await readFile(file, 'utf8'));
 // Git for Windows runs a hook with its own usr\bin first on PATH, and that is where the hook's `sh` comes from.
 // A test that calls dispatchHook itself on Windows has to put it there too. `git --exec-path` is <root>\mingw64\libexec\git-core.
 const gitShellPath = () => path.resolve(execFileSync('git', ['--exec-path'], { encoding: 'utf8' }).trim(), '..', '..', '..', 'usr', 'bin');
-function withGitShell(env) {
-  if (process.platform !== 'win32') return env;
-  const key = Object.keys(env).find(name => name.toUpperCase() === 'PATH') ?? 'PATH'; // a copied env may spell it `Path`
-  return { ...env, [key]: [gitShellPath(), env[key]].filter(Boolean).join(path.delimiter) };
+function prependPath(env, ...directories) {
+  const key = 'PATH' in env ? 'PATH' : Object.keys(env).find(name => name.toUpperCase() === 'PATH') ?? 'PATH'; // a copied env may spell it `Path`
+  return { ...env, [key]: [...directories, env[key]].filter(Boolean).join(path.delimiter) };
 }
+const withGitShell = env => process.platform === 'win32' ? prependPath(env, gitShellPath()) : env;
 
 test('Cursor, OpenCode and Pi install together, preserve user settings, and uninstall idempotently', async t => {
   const f = await fixture(t);
@@ -200,7 +200,7 @@ test('on Windows the original hook runs through sh with every argument quoted', 
   assert.equal(await run('win32', added), 0);
   const [win] = calls;
   assert.equal(win.command, 'sh');
-  assert.deepEqual(win.args, ['-c', 'exec "$0" "$@"', hook, ...args].map(msys2Quote));
+  assert.deepEqual(win.args, ['-c', `${RUN_HOOK}\nrun_hook "$0" "$@"`, hook, ...args].map(msys2Quote));
   assert.equal(win.options.windowsVerbatimArguments, true);
   assert.equal(win.options.cwd, f.repo);
   assert.deepEqual(win.options.stdio, ['pipe', 'inherit', 'inherit']);
@@ -247,6 +247,116 @@ test('a chained pre-push that exits without reading a large stdin still lets the
   // More than a pipe holds, so the write is still pending when the hook exits: EPIPE on POSIX, EOF on Windows.
   const input = 'refs/heads/b 1 refs/heads/b 2\n'.repeat(4000);
   assert.equal(await dispatchHook({ event: 'pre-push', args: ['origin', 'url'], input, cwd: f.repo, env: withGitShell(f.env), gate: async () => 23 }), 23);
+});
+
+test('the hook runner starts a hook by the interpreter name in its shebang and drops the options, as Git for Windows does', async t => {
+  const dir = await mkdtemp(path.join(tmpdir(), "sphinx run hook ' "));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const output = path.join(dir, 'output');
+  const args = ['origin', "D:\\x\\{a,b}\\it's.git", 'a b'];
+  const report = 'printf "%s\\n" "$@" > "$SPHINX_TEST_OUTPUT"\n';
+  const cases = [
+    // None of these interpreter directories exists. Git for Windows only looks at the name and finds it on PATH.
+    ['an interpreter path that exists nowhere', `#!/nowhere/bin/sh\n${report}`, 0],
+    ['options, which Git drops', `#!/nowhere/bin/sh -e\nfalse\n${report}`, 0],
+    ['a Windows path and a CRLF line end', `#!C:\\nowhere\\sh\r\n${report}`, 0],
+    ['env', `#!/usr/bin/env sh\n${report}`, 0],
+    ['node', "#!/nowhere/bin/node\nrequire('fs').writeFileSync(process.env.SPHINX_TEST_OUTPUT, process.argv.slice(2).join('\\n') + '\\n');\n", 0],
+    ['the exit status', '#!/nowhere/bin/sh\nexit 7\n', 7],
+    ['an interpreter that is not installed', '#!/nowhere/bin/no-such-interpreter\n', 127],
+  ];
+  const env = withGitShell(prependPath({ ...process.env, SPHINX_TEST_OUTPUT: output }, path.dirname(process.execPath)));
+  // As dispatchHook starts it: the script is the -c argument and the hook is $0. On Windows every argument is quoted for MSYS2.
+  const argv = hook => ['-c', `${RUN_HOOK}\nrun_hook "$0" "$@"`, hook, ...args];
+  for (const [name, content, status] of cases) {
+    const hook = path.join(dir, 'hook');
+    await executable(hook, content);
+    await rm(output, { force: true });
+    const run = process.platform === 'win32'
+      ? spawnSync('sh', argv(hook).map(msys2Quote), { env, cwd: dir, encoding: 'utf8', windowsVerbatimArguments: true })
+      : spawnSync('sh', argv(hook), { env, cwd: dir, encoding: 'utf8' });
+    assert.equal(run.status, status, `${name}: ${run.stderr}${run.error ?? ''}`);
+    const received = await readFile(output, 'utf8').catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
+    assert.equal(received, status === 0 ? `${args.join('\n')}\n` : null, name);
+  }
+});
+
+test('only native Windows hook scripts start an existing hook through the shebang runner, and every other script is unchanged', async t => {
+  const win = await fixture(t), other = await fixture(t);
+  await install({ ...win.options, platform: 'win32' });
+  await install({ ...other.options, platform: 'linux' });
+  const file = (f, event) => path.join(f.paths.home, 'hooks', 'global', event);
+  const [protocol, prepared, gated] = await Promise.all(['proc-receive', 'post-commit', 'pre-push'].map(event => readFile(file(win, event), 'utf8')));
+  assert.ok(protocol.includes(`\n${RUN_HOOK}\n`));
+  assert.ok(protocol.endsWith('\nif [ -x "$hook" ]; then\n  run_hook "$hook" "$@"\nfi\nexit 0\n'));
+  assert.ok(prepared.includes(`\n${RUN_HOOK}\n`));
+  assert.ok(prepared.includes('\nif [ -x "$hook" ]; then\n  (run_hook "$hook" "$@")\n  status=$?\nfi\n'));
+  assert.doesNotMatch(gated, /run_hook/, 'Gated events hand the original hook to Sphinx, which starts it itself');
+  for (const event of ['proc-receive', 'post-commit']) execFileSync('sh', ['-n', file(win, event)], { env: withGitShell(win.env) }); // valid shell
+
+  const [posixProtocol, posixPrepared] = await Promise.all(['proc-receive', 'post-commit'].map(event => readFile(file(other, event), 'utf8')));
+  assert.ok(posixProtocol.endsWith('\nif [ -x "$hook" ]; then\n  exec "$hook" "$@"\nfi\nexit 0\n'));
+  assert.ok(posixPrepared.includes('\nif [ -x "$hook" ]; then\n  "$hook" "$@"\n  status=$?\nfi\n'));
+  for (const text of [posixProtocol, posixPrepared]) assert.doesNotMatch(text, /run_hook|cntrl/);
+});
+
+test('on Windows a prepared hook still streams stdin, returns the original status, and schedules preparation afterwards', { skip: process.platform !== 'win32', timeout: 30000 }, async t => {
+  const f = await fixture(t);
+  const scheduled = path.join(f.base, 'scheduled');
+  // The shared fixture CLI imports install.js by a plain path, which Node on Windows rejects. This one only records its arguments.
+  await writeFile(f.cliPath, "import { writeFile } from 'node:fs/promises';\nawait writeFile(process.env.SPHINX_TEST_SCHEDULED, JSON.stringify(process.argv.slice(2)));\n");
+  await executable(path.join(f.repo, '.git/hooks/post-rewrite'), '#!/nowhere/bin/sh\nread first\nprintf "ack:%s\\n" "$first"\nread second\nprintf "done:%s:%s\\n" "$1" "$second"\nexit 13\n');
+  await install(f.options);
+  const script = path.join(f.git('config', '--global', '--get', 'core.hooksPath'), 'post-rewrite');
+  // Started from outside the repository, so the background preparation never keeps a directory of the test in use.
+  const child = spawn('sh', [script, 'amend'], { cwd: tmpdir(), env: withGitShell({ ...f.env, GIT_DIR: path.join(f.repo, '.git'), SPHINX_TEST_SCHEDULED: scheduled }), stdio: ['pipe', 'pipe', 'pipe'] });
+  t.after(() => child.kill());
+  let output = '';
+  const acknowledged = new Promise(resolve => child.stdout.on('data', chunk => { output += chunk; if (output.includes('ack:first\n')) resolve(); }));
+  const closed = new Promise(resolve => child.on('close', resolve));
+  child.stdin.write('first\n'); await acknowledged;
+  child.stdin.end('second\n');
+  assert.equal(await closed, 13);
+  assert.equal(output, 'ack:first\ndone:amend:second\n');
+  for (let i = 0; i < 100 && !await readFile(scheduled, 'utf8').catch(() => ''); i++) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.deepEqual(await json(scheduled), ['prepare']);
+});
+
+test('with Sphinx installed, hooks whose shebang names an interpreter by absolute path still run, for gated and ungated events', { skip: process.platform !== 'win32', timeout: 60000 }, async t => {
+  const f = await fixture(t);
+  const out = path.join(f.base, 'out');
+  await mkdir(out);
+  const marker = name => `require('fs').writeFileSync(process.env.SPHINX_TEST_OUTPUT + '/${name}', 'ran');\n`;
+  // The shared fixture imports install.js by a plain path, which Node on Windows only accepts as a file URL.
+  await writeFile(f.cliPath, `import { dispatchHook } from ${JSON.stringify(new URL('../src/install.js', import.meta.url).href)};\nlet input = ''; for await (const chunk of process.stdin) input += chunk;\nprocess.exitCode = await dispatchHook({ event: process.argv[4], args: process.argv.slice(5), input, gate: async () => 0 });\n`);
+  // Git alone runs all of these, although neither interpreter path exists in Git's own tree.
+  await executable(path.join(f.repo, '.git/hooks/pre-commit'), `#!/usr/local/bin/node\n${marker('pre-commit')}`);
+  await executable(path.join(f.repo, '.git/hooks/commit-msg'), '#!/nowhere/bin/sh -e\nfalse\nprintf ran > "$SPHINX_TEST_OUTPUT/commit-msg"\n');
+  await executable(path.join(f.repo, '.git/hooks/post-commit'), `#!/usr/bin/node\n${marker('post-commit')}`);
+  await install(f.options);
+  // SPHINX_EVALUATOR keeps post-commit from scheduling background preparation, which would outlive the test.
+  const env = prependPath({ ...f.env, SPHINX_TEST_OUTPUT: out, SPHINX_EVALUATOR: '1' }, path.dirname(process.execPath));
+  const commit = () => execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-q', '--allow-empty', '-m', 'base'], { cwd: f.repo, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  commit();
+  for (const name of ['pre-commit', 'commit-msg', 'post-commit']) assert.equal(await readFile(path.join(out, name), 'utf8'), 'ran', name);
+  // A failing hook still blocks the commit.
+  await executable(path.join(f.repo, '.git/hooks/commit-msg'), '#!/usr/bin/node\nprocess.exit(5);\n');
+  assert.throws(commit, error => error.status === 1);
+});
+
+test('an existing pre-push hook started through node by absolute path gets its arguments and stdin intact', { skip: process.platform !== 'win32', timeout: 60000 }, async t => {
+  const f = await fixture(t, { prefix: "sphinx 한글 O'Neil {a,b} " });
+  const output = path.join(f.base, 'received');
+  const body = "let input = '';\nprocess.stdin.on('data', chunk => { input += chunk; });\nprocess.stdin.on('end', () => {\n  require('fs').writeFileSync(process.env.SPHINX_TEST_OUTPUT, JSON.stringify({ args: process.argv.slice(2), input }));\n  process.exit(19);\n});\n";
+  await executable(path.join(f.repo, '.git/hooks/pre-push'), `#!/usr/local/bin/node\n${body}`);
+  await install(f.options);
+  const args = ['origin', "\\\\localhost\\share\\x{a,b}\\it's.git"];
+  const input = 'refs/heads/main 123 refs/heads/main 456\n'.repeat(3);
+  let calls = 0;
+  const env = withGitShell(prependPath({ ...f.env, SPHINX_TEST_OUTPUT: output }, path.dirname(process.execPath)));
+  assert.equal(await dispatchHook({ event: 'pre-push', args, input, cwd: f.repo, env, gate: async () => { calls++; return 0; } }), 19);
+  assert.equal(calls, 0);
+  assert.deepEqual(JSON.parse(await readFile(output, 'utf8')), { args, input });
 });
 
 test('fresh repositories initialize and clone after global installation while existing reference hooks still reject', async t => {

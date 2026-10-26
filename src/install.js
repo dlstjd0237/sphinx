@@ -6,7 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { constants as osConstants } from 'node:os';
 import { getPaths } from './config.js';
-import { msys2Quote, withoutAddedCwdBlock } from './windows.js';
+import { RUN_HOOK, msys2Quote, withoutAddedCwdBlock } from './windows.js';
 import { nativeHookSpecs, installedHookSpecs, hasHook, addHook, removeHook, prepareMcp, commitMcp, rollbackMcp, removeMcp, inspectMcp } from './agent-settings.js';
 import { lifecycleHome, prepareCursorIntegration, prepareOpenCodeIntegration, removeLifecycleIntegration, lifecycleIntegrationStatus } from './lifecycle-integrations.js';
 import { preparePiIntegration, removePiIntegration, piIntegrationStatus, piIntegrationHome } from './pi-integration.js';
@@ -165,19 +165,24 @@ function sourceShell(source) {
     : 'if ! hook_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then\n  if [ -z "${GIT_DIR:-}" ] || [ ! -d "$GIT_DIR" ]; then\n    git rev-parse --git-common-dir >/dev/null\n    exit 128\n  fi\n  hook_dir=$GIT_DIR\nfi\nhook_dir="$hook_dir/hooks"\n';
 }
 
-function hookScript({ event, source, launcher, home, id }) {
+function hookScript({ event, source, launcher, home, id, platform = process.platform }) {
   const header = '#!/bin/sh\n# Managed by Sphinx. Existing hooks remain in their original directory.\n';
   if (GATED.has(event)) {
     return `${header}SPHINX_HOME=${quote(home)} SPHINX_INSTALL_ID=${quote(id)} ${launcher.env}exec ${launcher.command} hook git ${quote(event)} "$@"\n`;
   }
+  // Git's sh alone would not find the interpreter of a Windows hook's `#!` line the way Git does, so native Windows runs the
+  // existing hook through run_hook. Everywhere else the scripts are exactly as they always were.
+  const windows = platform === 'win32';
+  const runner = windows ? `# Start the hook as Git for Windows does: by the interpreter's name in its #! line, without its options.\n${RUN_HOOK}\n` : '';
   if (PREPARED.has(event)) {
     // The existing hook retains streaming stdin and its exit status. Scheduling
     // has no terminal, runs asynchronously, and never gates the Git operation.
-    return `${header}${sourceShell(source)}hook="$hook_dir/${event}"\nstatus=0\nif [ -x "$hook" ]; then\n  "$hook" "$@"\n  status=$?\nfi\nif [ "\${SPHINX_EVALUATOR:-}" != "1" ]; then\n  SPHINX_HOME=${quote(home)} ${launcher.env}${launcher.command} prepare </dev/null >/dev/null 2>&1 &\nfi\nexit "$status"\n`;
+    // run_hook replaces its shell, so on Windows a subshell keeps this script alive for the scheduling below.
+    return `${header}${runner}${sourceShell(source)}hook="$hook_dir/${event}"\nstatus=0\nif [ -x "$hook" ]; then\n  ${windows ? '(run_hook "$hook" "$@")' : '"$hook" "$@"'}\n  status=$?\nfi\nif [ "\${SPHINX_EVALUATOR:-}" != "1" ]; then\n  SPHINX_HOME=${quote(home)} ${launcher.env}${launcher.command} prepare </dev/null >/dev/null 2>&1 &\nfi\nexit "$status"\n`;
   }
   // Protocol hooks such as proc-receive must retain streaming stdin/stdout.
   // They exec the prior hook directly rather than buffering input in Node.
-  return `${header}${sourceShell(source)}hook="$hook_dir/${event}"\nif [ -x "$hook" ]; then\n  exec "$hook" "$@"\nfi\nexit 0\n`;
+  return `${header}${runner}${sourceShell(source)}hook="$hook_dir/${event}"\nif [ -x "$hook" ]; then\n  ${windows ? 'run_hook' : 'exec'} "$hook" "$@"\nfi\nexit 0\n`;
 }
 
 async function hookNames(source, cwd, env) {
@@ -285,7 +290,7 @@ export async function install({ config, agents = 'auto', repo = false, cwd = pro
   });
   if (directoryState?.isSymbolicLink()) throw new Error(`Refusing to replace a symlinked hook directory: ${entry.hookDir}`);
   const names = await hookNames(entry.source, cwd, env);
-  const scripts = names.map(event => ({ event, content: hookScript({ event, source: entry.source, launcher, home: paths.home, id }) }));
+  const scripts = names.map(event => ({ event, content: hookScript({ event, source: entry.source, launcher, home: paths.home, id, platform }) }));
   for (const { event, content } of scripts) {
     const file = path.join(entry.hookDir, event);
     const fileState = await lstat(file).catch(error => {
@@ -431,11 +436,12 @@ export async function dispatchHook({ event, args = [], input = '', cwd = process
   if (isExecutable) {
     const stdio = [event === 'pre-commit' ? 'inherit' : 'pipe', 'inherit', 'inherit'];
     const code = await new Promise((resolve, reject) => {
-      // Windows cannot start an extensionless `#!` script, so Git's sh runs it and honors the shebang as Git does. MSYS2
-      // strips quotes from and globs unquoted arguments, so every one is quoted. The hook searches for commands as it would
-      // under Git alone; libuv reads the cwd-search block from this process, so finding `sh` stays protected.
+      // Windows cannot start an extensionless `#!` script, so Git's sh runs it, finding the interpreter by the name in its
+      // shebang as Git does (RUN_HOOK). MSYS2 strips quotes from and globs unquoted arguments, so every one is quoted. The hook
+      // searches for commands as it would under Git alone; libuv reads the cwd-search block from this process, so finding `sh`
+      // stays protected.
       const child = platform === 'win32'
-        ? spawnImpl('sh', ['-c', 'exec "$0" "$@"', original, ...args].map(msys2Quote), { cwd, env: withoutAddedCwdBlock({ ...env, SPHINX_HOOK_DEPTH: '1' }), stdio, windowsVerbatimArguments: true })
+        ? spawnImpl('sh', ['-c', `${RUN_HOOK}\nrun_hook "$0" "$@"`, original, ...args].map(msys2Quote), { cwd, env: withoutAddedCwdBlock({ ...env, SPHINX_HOOK_DEPTH: '1' }), stdio, windowsVerbatimArguments: true })
         : spawnImpl(original, args, { cwd, env: { ...env, SPHINX_HOOK_DEPTH: '1' }, stdio });
       // A hook may exit without reading stdin: EPIPE on POSIX, EOF on Windows.
       child.stdin?.on('error', error => { if (!['EPIPE', 'EOF'].includes(error.code)) reject(error); });
