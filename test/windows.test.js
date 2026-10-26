@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { CWD_SEARCH_MARKER, blockCwdExeSearch, envValue, msvcrtQuote, msys2Quote, withoutAddedCwdBlock } from '../src/windows.js';
+import { CWD_SEARCH_MARKER, blockCwdExeSearch, envValue, msys2Quote, withoutAddedCwdBlock } from '../src/windows.js';
 
 const exec = promisify(execFile);
 const CLI = fileURLToPath(new URL('../bin/sphinx.js', import.meta.url));
@@ -15,15 +15,6 @@ test('envValue matches Windows variable names ignoring case and POSIX names exac
   assert.equal(envValue({ SYSTEMROOT: 'D:\\Win' }, 'SystemRoot', 'win32'), 'D:\\Win');
   assert.equal(envValue({ SYSTEMROOT: 'D:\\Win' }, 'SystemRoot', 'linux'), undefined);
   assert.equal(envValue({ Path: 'a' }, 'PATH', 'win32'), 'a');
-});
-
-test('msvcrtQuote always wraps in double quotes and escapes quotes and the backslashes before a quote or the end', () => {
-  assert.equal(msvcrtQuote(String.raw`C:\Users\O'Neil\h`), String.raw`"C:\Users\O'Neil\h"`);
-  assert.equal(msvcrtQuote('a"b'), String.raw`"a\"b"`);
-  assert.equal(msvcrtQuote(String.raw`a\"b`), String.raw`"a\\\"b"`);
-  assert.equal(msvcrtQuote('C:\\dir\\'), String.raw`"C:\dir\\"`);
-  assert.equal(msvcrtQuote('exec "$0" "$@"'), String.raw`"exec \"$0\" \"$@\""`);
-  assert.equal(msvcrtQuote(''), '""');
 });
 
 test('msys2Quote always wraps in double quotes and escapes every backslash and quote', () => {
@@ -98,8 +89,9 @@ test('a repository-root git.exe never runs when Sphinx calls Git', { skip: proce
 });
 
 test("Git's sh runs a hook and gets its arguments unchanged when they are quoted with msys2Quote", { skip: process.platform !== 'win32', timeout: 60000 }, async t => {
-  // sh is an MSYS2 program, which also collapses a run of backslashes inside quotes. Quoted with msvcrtQuote, a hook path
-  // or remote URL starting with two backslashes lost one, so the `exec "$0" "$@"` chain failed with exit 127 or got a wrong URL.
+  // sh is an MSYS2 program, which also collapses a run of backslashes inside quotes. Quoted the way a native Windows program
+  // reads them (libuv's rule), a hook path or remote URL starting with two backslashes lost one, so the `exec "$0" "$@"`
+  // chain failed with exit 127 or got a wrong URL.
   const root = await realpath(await mkdtemp(join(tmpdir(), 'sphinx-windows-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const hook = join(root, 'pre-push');

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm, chmod, symlink, lstat } from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +9,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { install, uninstall, doctor, dispatchHook, detectAgents, checkAgentPlatform, WINDOWS_AGENT_HINT } from '../src/install.js';
 import { getPaths } from '../src/config.js';
 import { lifecycleHome } from '../src/lifecycle-integrations.js';
+import { msys2Quote } from '../src/windows.js';
 
 async function fixture(t, { prefix = "sphinx install ' " } = {}) {
   const base = await mkdtemp(path.join(tmpdir(), prefix));
@@ -29,6 +31,15 @@ async function fixture(t, { prefix = "sphinx install ' " } = {}) {
 
 async function executable(file, content) { await mkdir(path.dirname(file), { recursive: true }); await writeFile(file, content, { mode: 0o755 }); await chmod(file, 0o755); }
 const json = async file => JSON.parse(await readFile(file, 'utf8'));
+
+// Git for Windows runs a hook with its own usr\bin first on PATH, and that is where the hook's `sh` comes from.
+// A test that calls dispatchHook itself on Windows has to put it there too. `git --exec-path` is <root>\mingw64\libexec\git-core.
+const gitShellPath = () => path.resolve(execFileSync('git', ['--exec-path'], { encoding: 'utf8' }).trim(), '..', '..', '..', 'usr', 'bin');
+function withGitShell(env) {
+  if (process.platform !== 'win32') return env;
+  const key = Object.keys(env).find(name => name.toUpperCase() === 'PATH') ?? 'PATH'; // a copied env may spell it `Path`
+  return { ...env, [key]: [gitShellPath(), env[key]].filter(Boolean).join(path.delimiter) };
+}
 
 test('Cursor, OpenCode and Pi install together, preserve user settings, and uninstall idempotently', async t => {
   const f = await fixture(t);
@@ -160,12 +171,82 @@ test('gated hooks preserve stdin and arguments and do not bypass an original rej
   await executable(path.join(f.repo, '.git/hooks/pre-push'), '#!/bin/sh\nprintf "%s\\n" "$@" > "$SPHINX_TEST_OUTPUT"\ncat >> "$SPHINX_TEST_OUTPUT"\nexit 19\n');
   await install(f.options);
   let calls = 0;
-  assert.equal(await dispatchHook({ event: 'pre-push', args: ['origin', 'url with spaces'], input: 'refs/heads/main 123 refs/heads/main 456\n', cwd: f.repo, env: { ...f.env, SPHINX_TEST_OUTPUT: output }, gate: async () => { calls++; return 0; } }), 19);
+  assert.equal(await dispatchHook({ event: 'pre-push', args: ['origin', 'url with spaces'], input: 'refs/heads/main 123 refs/heads/main 456\n', cwd: f.repo, env: withGitShell({ ...f.env, SPHINX_TEST_OUTPUT: output }), gate: async () => { calls++; return 0; } }), 19);
   assert.equal(calls, 0);
   assert.equal(await readFile(output, 'utf8'), 'origin\nurl with spaces\nrefs/heads/main 123 refs/heads/main 456\n');
   await rm(path.join(f.repo, '.git/hooks/pre-push'));
   assert.equal(await dispatchHook({ event: 'pre-push', args: [], input: '', cwd: f.repo, env: f.env, gate: async () => 23 }), 23);
   assert.equal(await dispatchHook({ event: 'pre-commit', args: [], input: '', cwd: f.repo, env: { ...f.env, SPHINX_EVALUATOR: '1' }, gate: async () => 23 }), 0);
+});
+
+test('on Windows the original hook runs through sh with every argument quoted', async t => {
+  const f = await fixture(t);
+  await install(f.options);
+  const hook = path.join(f.git('rev-parse', '--path-format=absolute', '--git-common-dir'), 'hooks', 'pre-push');
+  await executable(hook, '#!/bin/sh\nexit 0\n');
+  const calls = [];
+  const spawnImpl = (command, args, options) => {
+    calls.push({ command, args, options });
+    const child = new EventEmitter();
+    child.stdin = { on() {}, end() {} };
+    setImmediate(() => child.emit('close', 0, null));
+    return child;
+  };
+  const args = ['origin', "D:\\x\\{a,b}\\it's.git"];
+  const run = (platform, env) => dispatchHook({ event: 'pre-push', args, input: 'refs/heads/main 123 refs/heads/main 456\n', cwd: f.repo, env, gate: async () => 0, spawnImpl, platform });
+
+  // The switch and its marker are Sphinx's own, so the user's hook gets the environment Git alone would give it.
+  const added = { ...f.env, NoDefaultCurrentDirectoryInExePath: '1', SPHINX_ADDED_NO_CWD_SEARCH: '1' };
+  assert.equal(await run('win32', added), 0);
+  const [win] = calls;
+  assert.equal(win.command, 'sh');
+  assert.deepEqual(win.args, ['-c', 'exec "$0" "$@"', hook, ...args].map(msys2Quote));
+  assert.equal(win.options.windowsVerbatimArguments, true);
+  assert.equal(win.options.cwd, f.repo);
+  assert.deepEqual(win.options.stdio, ['pipe', 'inherit', 'inherit']);
+  assert.equal(win.options.env.SPHINX_HOOK_DEPTH, '1');
+  assert.equal('NoDefaultCurrentDirectoryInExePath' in win.options.env, false);
+  assert.equal('SPHINX_ADDED_NO_CWD_SEARCH' in win.options.env, false);
+  assert.equal(added.NoDefaultCurrentDirectoryInExePath, '1', 'dispatchHook leaves the environment it was given alone');
+
+  // A switch the user set without Sphinx is theirs to keep.
+  const owned = { ...f.env, NoDefaultCurrentDirectoryInExePath: '1' };
+  delete owned.SPHINX_ADDED_NO_CWD_SEARCH;
+  assert.equal(await run('win32', owned), 0);
+  assert.equal(calls[1].options.env.NoDefaultCurrentDirectoryInExePath, '1');
+
+  // Anywhere else the hook file is started directly, exactly as before.
+  assert.equal(await run('linux', added), 0);
+  const posix = calls[2];
+  assert.equal(posix.command, hook);
+  assert.deepEqual(posix.args, args);
+  assert.equal('windowsVerbatimArguments' in posix.options, false);
+  assert.deepEqual(posix.options.env, { ...added, SPHINX_HOOK_DEPTH: '1' });
+  assert.equal(calls.length, 3);
+});
+
+test('an existing pre-push hook in a path with Hangul, an apostrophe, braces and spaces still chains', async t => {
+  const f = await fixture(t, { prefix: "sphinx 한글 O'Neil {a,b} " });
+  const output = path.join(f.base, 'stdin');
+  await executable(path.join(f.repo, '.git/hooks/pre-push'), '#!/bin/sh\nprintf "%s\\n" "$@" > "$SPHINX_TEST_OUTPUT"\ncat >> "$SPHINX_TEST_OUTPUT"\nexit 19\n');
+  await install(f.options);
+  // A UNC remote URL starts with two backslashes, which MSYS2 would halve if they were not escaped. localhost resolves at once,
+  // while MSYS2 spends seconds on every argument whose server name does not.
+  const args = ['origin', "\\\\localhost\\share\\x{a,b}\\it's.git"];
+  const input = 'refs/heads/main 123 refs/heads/main 456\n';
+  let calls = 0;
+  assert.equal(await dispatchHook({ event: 'pre-push', args, input, cwd: f.repo, env: withGitShell({ ...f.env, SPHINX_TEST_OUTPUT: output }), gate: async () => { calls++; return 0; } }), 19);
+  assert.equal(calls, 0);
+  assert.equal(await readFile(output, 'utf8'), `${args.join('\n')}\n${input}`);
+});
+
+test('a chained pre-push that exits without reading a large stdin still lets the gate run', async t => {
+  const f = await fixture(t);
+  await executable(path.join(f.repo, '.git/hooks/pre-push'), '#!/bin/sh\nexit 0\n');
+  await install(f.options);
+  // More than a pipe holds, so the write is still pending when the hook exits: EPIPE on POSIX, EOF on Windows.
+  const input = 'refs/heads/b 1 refs/heads/b 2\n'.repeat(4000);
+  assert.equal(await dispatchHook({ event: 'pre-push', args: ['origin', 'url'], input, cwd: f.repo, env: withGitShell(f.env), gate: async () => 23 }), 23);
 });
 
 test('fresh repositories initialize and clone after global installation while existing reference hooks still reject', async t => {
@@ -230,7 +311,7 @@ test('repository override is diagnosed and explicitly chained without replacing 
   assert.equal((await doctor(f.options)).checks.find(c => c.name === 'Current repository').ok, true);
   const reinstalled = await install(f.options);
   assert.equal(reinstalled.warnings.some(w => w.includes('overrides')), false, 'An existing Sphinx repository dispatcher already covers this override');
-  assert.equal(await dispatchHook({ event: 'pre-push', input: '', cwd: f.repo, env: f.env, gate: async () => 0 }), 12);
+  assert.equal(await dispatchHook({ event: 'pre-push', input: '', cwd: f.repo, env: withGitShell(f.env), gate: async () => 0 }), 12);
   await uninstall({ ...f.options, repo: true });
   assert.equal(f.git('config', '--local', '--get', 'core.hooksPath'), 'custom-hooks');
   assert.match(await readFile(path.join(f.repo, 'custom-hooks/pre-push'), 'utf8'), /exit 12/);

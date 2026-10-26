@@ -13,12 +13,6 @@ export function envValue(env, name, platform = process.platform) {
   return Object.entries(env).find(([key]) => sameName(key, name))?.[1];
 }
 
-// libuv's argument quoting, except that every argument is wrapped. It is what a native Windows program (MSVCRT,
-// Node) reads back unchanged. Git's sh is not one: its MSYS2 runtime reads backslashes differently, so use msys2Quote.
-export function msvcrtQuote(arg) {
-  return `"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`;
-}
-
 // Quoting for Git's sh, an MSYS2 program started with windowsVerbatimArguments. Every argument is wrapped, because MSYS2
 // strips quotes from and globs unquoted ones, which would change `O'Neil` or `{a,b}` in a path. Inside the quotes it also
 // turns each pair of backslashes into one, so `\\server\share` would arrive as `\server\share`. Like Git for Windows' own

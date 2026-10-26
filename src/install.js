@@ -6,6 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { constants as osConstants } from 'node:os';
 import { getPaths } from './config.js';
+import { msys2Quote, withoutAddedCwdBlock } from './windows.js';
 import { nativeHookSpecs, installedHookSpecs, hasHook, addHook, removeHook, prepareMcp, commitMcp, rollbackMcp, removeMcp, inspectMcp } from './agent-settings.js';
 import { lifecycleHome, prepareCursorIntegration, prepareOpenCodeIntegration, removeLifecycleIntegration, lifecycleIntegrationStatus } from './lifecycle-integrations.js';
 import { preparePiIntegration, removePiIntegration, piIntegrationStatus, piIntegrationHome } from './pi-integration.js';
@@ -410,7 +411,7 @@ export async function uninstall({ env = process.env, cwd = process.cwd(), repo =
   return { messages, warnings };
 }
 
-export async function dispatchHook({ event, args = [], input = '', cwd = process.cwd(), env = process.env, gate }) {
+export async function dispatchHook({ event, args = [], input = '', cwd = process.cwd(), env = process.env, gate, spawnImpl = spawn, platform = process.platform }) {
   if (!/^[a-z][a-z0-9-]*$/.test(event)) throw new Error('Invalid Git hook event.');
   const { manifest } = await manifestFor(env);
   let entry = manifest.installs[env.SPHINX_INSTALL_ID];
@@ -428,9 +429,16 @@ export async function dispatchHook({ event, args = [], input = '', cwd = process
     if (!['ENOENT', 'ENOTDIR', 'EACCES'].includes(error.code)) throw error;
   }
   if (isExecutable) {
+    const stdio = [event === 'pre-commit' ? 'inherit' : 'pipe', 'inherit', 'inherit'];
     const code = await new Promise((resolve, reject) => {
-      const child = spawn(original, args, { cwd, env: { ...env, SPHINX_HOOK_DEPTH: '1' }, stdio: [event === 'pre-commit' ? 'inherit' : 'pipe', 'inherit', 'inherit'] });
-      child.stdin?.on('error', error => { if (error.code !== 'EPIPE') reject(error); });
+      // Windows cannot start an extensionless `#!` script, so Git's sh runs it and honors the shebang as Git does. MSYS2
+      // strips quotes from and globs unquoted arguments, so every one is quoted. The hook searches for commands as it would
+      // under Git alone; libuv reads the cwd-search block from this process, so finding `sh` stays protected.
+      const child = platform === 'win32'
+        ? spawnImpl('sh', ['-c', 'exec "$0" "$@"', original, ...args].map(msys2Quote), { cwd, env: withoutAddedCwdBlock({ ...env, SPHINX_HOOK_DEPTH: '1' }), stdio, windowsVerbatimArguments: true })
+        : spawnImpl(original, args, { cwd, env: { ...env, SPHINX_HOOK_DEPTH: '1' }, stdio });
+      // A hook may exit without reading stdin: EPIPE on POSIX, EOF on Windows.
+      child.stdin?.on('error', error => { if (!['EPIPE', 'EOF'].includes(error.code)) reject(error); });
       child.on('error', reject);
       child.on('close', (status, signal) => resolve(status ?? (osConstants.signals[signal] ? 128 + osConstants.signals[signal] : 1)));
       child.stdin?.end(input);
