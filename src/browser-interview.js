@@ -54,8 +54,9 @@ export async function openQuestionnaireBrowser(url, { env = process.env, platfor
   if (parsed.protocol !== 'http:' || parsed.hostname !== '127.0.0.1' || !parsed.port) throw new Error('Invalid local questionnaire URL.');
   if (platform === 'win32') {
     // Run from System32, not the repository: a browser this call starts would keep that folder locked. rundll32 is a
-    // GUI program, so no windowsHide. Its exit code is always 0 and says nothing, and it is not detached, so it is
-    // never killed or waited for: it ends with the hook at the latest, while a browser it started lives on.
+    // GUI program, so no windowsHide. Its exit code is always 0 and says nothing, so it is never waited for or killed.
+    // It is not detached and is unref'd, so a rundll32 stuck on a dialog of its own cannot keep the hook running once
+    // Sphinx has stopped: libuv's job object ends it with the hook, while a browser it already started lives on.
     const system32 = path.win32.join(envValue(env, 'SystemRoot', 'win32') ?? process.env.SystemRoot ?? 'C:\\Windows', 'System32');
     const clean = Object.fromEntries(Object.entries(env).filter(([key]) => !/^(GIT_|SPHINX_)/i.test(key)));
     return new Promise(resolve => {
@@ -65,6 +66,7 @@ export async function openQuestionnaireBrowser(url, { env = process.env, platfor
       child.once('spawn', () => resolve('foreground'));
       child.on('error', () => resolve(false)); // after 'spawn' the promise is settled, so a late error only has to be heard
       child.on('exit', () => {});
+      child.unref?.();
     });
   }
   return new Promise(resolve => {

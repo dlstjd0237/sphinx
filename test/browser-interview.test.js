@@ -64,8 +64,8 @@ test('browser launch uses only macOS background open and never activates or mini
 
 test('on Windows the page opens in front through rundll32, with no shell, no hide flag, and no Git or Sphinx variables', { timeout: 5000 }, async () => {
   const url = 'http://127.0.0.1:12345/token', child = new EventEmitter();
-  let invocation, killed = false;
-  child.kill = () => { killed = true; };
+  let invocation, killed = false, unrefs = 0;
+  child.kill = () => { killed = true; }; child.unref = () => { unrefs++; };
   // The stub only ever spawns. rundll32's exit code is always 0 and says nothing, so the answer cannot wait for the exit.
   const result = await openQuestionnaireBrowser(url, { platform: 'win32', env: { SYSTEMROOT: 'D:\\Win', GIT_DIR: 'x', git_index_file: 'i', SPHINX_HOME: 'y', KEEP: 'z' }, spawnImpl: (command, args, options) => {
     invocation = { command, args, options }; setImmediate(() => child.emit('spawn')); return child;
@@ -75,7 +75,7 @@ test('on Windows the page opens in front through rundll32, with no shell, no hid
   assert.equal(invocation.options.cwd, 'D:\\Win\\System32', 'a browser this starts must not hold the repository folder');
   assert.equal(invocation.options.env.KEEP, 'z'); assert.deepEqual(Object.keys(invocation.options.env).filter(key => /^(GIT_|SPHINX_)/i.test(key)), []);
   assert.equal(invocation.options.stdio, 'ignore'); assert.equal(Object.hasOwn(invocation.options, 'windowsHide'), false, 'rundll32 is a GUI program'); assert.equal(invocation.options.shell, undefined);
-  assert.equal(killed, false);
+  assert.equal(killed, false); assert.equal(unrefs, 1, 'a rundll32 stuck on a dialog of its own must not keep the hook running after Sphinx has stopped');
   assert.doesNotThrow(() => { child.emit('error', new Error('late')); child.emit('exit', 0); }, 'a late error or the exit must not crash the hook');
   assert.equal(killed, false, 'rundll32 is never killed');
 });
