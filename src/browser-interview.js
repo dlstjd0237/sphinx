@@ -32,8 +32,10 @@ const words = event => event === 'pre-commit' ? ['commit', 'Commit'] : ['push', 
 const keptPass = op => `Your pass is saved, so the next ${op} of this change asks only whether to continue.`;
 
 /**
- * A quiet macOS notification that questions are waiting, since the page opens
- * in a background tab. Never steals focus; text travels as arguments, never as
+ * A quiet macOS notification that questions (or the Continue choice) are waiting.
+ * It is sent however the page opened: a terminal or coding agent opens it in a
+ * background tab, and a GUI Git client's push opens it in front, where this is
+ * only a second cue. Never steals focus; text travels as arguments, never as
  * script. Skipped over SSH, in CI, and off macOS. Never throws.
  */
 export function notifyDesktop({ title, message, env = process.env, platform = process.platform, spawnImpl = spawn } = {}) {

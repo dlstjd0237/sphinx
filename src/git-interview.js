@@ -56,8 +56,10 @@ export async function runGitCheckpointTerminal({ request, env = process.env, sig
   }
 }
 
-/** Whether to ask in the terminal instead of the browser. `auto` uses the
- * browser only where Sphinx can open it in the background (local macOS). */
+/** Whether to ask in the terminal instead of the browser. `auto` goes straight to the
+ * browser only on a local Mac. Everywhere else, Windows included, it prefers the terminal.
+ * Windows has no terminal path (openVisibleTerminal returns null and no terminal window
+ * launches), so the gate falls back to the browser, which opens by itself there. */
 export function prefersTerminal(config, { env = process.env, platform = process.platform } = {}) {
   if (config.interface === 'terminal') return true;
   if (config.interface === 'browser') return false;

@@ -345,6 +345,22 @@ test('each public CLI command provides contextual help without setup or model ca
   assert.deepEqual(await f.calls(), []);
 });
 
+test('help says the questionnaire opens by itself on macOS and Windows, and that Windows opens no clients', { timeout: 30000 }, async t => {
+  const f = await fixture(t);
+  // The JSON form is the help text as written, so terminal wrapping cannot split a sentence.
+  const flat = value => Array.isArray(value) ? value.map(flat).join('\n') : value && typeof value === 'object' ? flat(Object.values(value)) : String(value ?? '');
+  const help = command => flat(JSON.parse(f.cli(command, '--help', '--json')));
+  const install = help('install');
+  assert.ok(install.includes('On macOS and Windows it opens in your default browser by itself: in front on Windows and for GUI Git clients on macOS, in the background for macOS terminals and coding agents. Other environments print its local URL.'), install);
+  // Guided installation, --launch and --no-launch each say they open clients, so each carries the Windows exception.
+  assert.equal(install.split(WINDOWS_NOTE).length - 1, 3, install);
+  assert.ok(install.includes('On Windows, only claude is supported; auto connects no new agent but keeps Claude Code if it is already connected.'));
+  for (const command of ['activate', 'mcp']) assert.ok(help(command).includes(WINDOWS_NOTE), `${command} help should carry the Windows exception`);
+  assert.ok(help('config').includes('auto (default): the browser on a local Mac or on Windows, otherwise inline in the terminal you ran Git from.'));
+  assert.ok(squash(f.cli('--help')).includes(`Open fresh coding-agent sessions with Sphinx. ${WINDOWS_NOTE}`));
+  assert.match(squash(f.cli('config', '--interface', 'auto')), /Questions appear in the browser on a local Mac or Windows, otherwise in the terminal\./);
+});
+
 test('scripted installation defers client launch and activate checks configured selections', async t => {
   const f = await fixture(t);
   const output = f.cli('install', '--yes', '--provider', 'claude', '--agents', 'claude');

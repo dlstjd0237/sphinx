@@ -111,7 +111,11 @@ export async function askInstall(config, initial, prompts, { detectedAgents = []
     ];
     // Native Windows connects Claude Code only. cli.js passes the agents already connected there, not detected ones.
     const choices = platform === 'win32' ? agents.filter(agent => agent.value === 'claude') : agents;
-    const selected = await prompts.multiselect({ title: 'Which coding agents do you use?', description: 'Connect any combination. Detected agents are preselected; clear all for Git-only use. Previously connected agents remain installed.', current: detectedAgents.filter(name => choices.some(choice => choice.value === name)), choices });
+    // A single choice is not "any combination", and nothing is detected there.
+    const description = platform === 'win32'
+      ? 'On Windows, Sphinx connects Claude Code only. It is preselected when already connected; clear it for Git-only use. A connected integration stays installed.'
+      : 'Connect any combination. Detected agents are preselected; clear all for Git-only use. Previously connected agents remain installed.';
+    const selected = await prompts.multiselect({ title: 'Which coding agents do you use?', description, current: detectedAgents.filter(name => choices.some(choice => choice.value === name)), choices });
     values.agents = selected.length ? selected.join(',') : 'none';
   }
   const tiers = ['small', 'medium', 'large'];
@@ -127,10 +131,12 @@ export async function askInstall(config, initial, prompts, { detectedAgents = []
     const plan = ['codex', 'claude'].find(name => agents.includes(name) && runnable(name)) ?? ['claude', 'codex'].find(name => installedPlans.includes(name));
     const recommended = plan ? `${plan}-economy` : undefined;
     const current = hasExistingConfig ? 'keep' : recommended;
+    // Without a runnable CLI nothing is recommended on Windows, so say why instead of leaving an empty default.
+    const windowsCliNote = platform === 'win32' && !installedPlans.length ? ' On Windows, the Claude Code and Codex presets need claude.exe or codex.exe from the native installers, and none was found; choose OpenRouter or install one first.' : '';
     for (;;) {
       const choice = await prompts.choose({
         title: 'Choose your evaluator models',
-        description: 'A separate evaluator reads filtered code without your coding conversation. Codex and Claude use their signed-in CLI and usage allowance. Pi, Cursor, and OpenCode need a separate evaluator route. Paid OpenRouter presets use API credits; choosing one enables paid requests. There is no model-call cap by default; set one later with sphinx config --max-model-calls. Setup makes no model calls.',
+        description: `A separate evaluator reads filtered code without your coding conversation. Codex and Claude use their signed-in CLI and usage allowance. Pi, Cursor, and OpenCode need a separate evaluator route. Paid OpenRouter presets use API credits; choosing one enables paid requests. There is no model-call cap by default; set one later with sphinx config --max-model-calls. Setup makes no model calls.${windowsCliNote}`,
         current, requireSelection: !current,
         choices: [
           ...(hasExistingConfig ? [{ value: 'keep', label: 'Keep current model routes', description: `Small: ${routeText(config.models.small)}. Medium: ${routeText(config.models.medium)}. Large: ${routeText(config.models.large)}.` }] : []),

@@ -148,6 +148,7 @@ test('agent checkboxes accept arbitrary combinations, preselect detection, and s
   const prompts = createPrompts({ ui: output.ui, ask: () => assert.fail('other choices were supplied'), select: async options => {
     selections++;
     assert.equal(options.title, 'Which coding agents do you use?');
+    assert.equal(options.description, 'Connect any combination. Detected agents are preselected; clear all for Git-only use. Previously connected agents remain installed.');
     assert.deepEqual(options.current, ['claude', 'pi']);
     assert.deepEqual(options.choices.map(choice => choice.value), ['codex', 'claude', 'pi', 'cursor', 'opencode']);
     return ['pi', 'cursor', 'opencode'];
@@ -163,11 +164,12 @@ test('agent checkboxes accept arbitrary combinations, preselect detection, and s
 
 test('on Windows, guided setup offers only Claude Code, preselected only when already connected', async () => {
   const initial = { provider: 'claude', events: 'pre-push', branches: 'main', remotes: '*', level: 'standard', distance: 'high', mode: 'block' };
-  const current = [];
+  const current = [], descriptions = [];
   let chosen = [];
   const prompts = createPrompts({ ui: capture().ui, ask: () => assert.fail('other choices were supplied'), select: async options => {
     assert.deepEqual(options.choices.map(choice => choice.value), ['claude']);
     current.push(options.current);
+    descriptions.push(options.description);
     return chosen;
   } });
   // Another connected agent never preselects Claude Code, and clearing the box leaves Git hooks only.
@@ -175,6 +177,9 @@ test('on Windows, guided setup offers only Claude Code, preselected only when al
   chosen = ['claude'];
   assert.equal((await askInstall(DEFAULT_CONFIG, initial, prompts, { detectedAgents: ['claude', 'codex'], platform: 'win32' })).agents, 'claude');
   assert.deepEqual(current, [[], ['claude']]);
+  // One choice is not "any combination", and nothing is detected there: the text says what Windows does.
+  const onWindows = 'On Windows, Sphinx connects Claude Code only. It is preselected when already connected; clear it for Git-only use. A connected integration stays installed.';
+  assert.deepEqual(descriptions, [onWindows, onWindows]);
 });
 
 test('checkbox line fallback toggles any agents and all without accepting partially invalid input', async () => {
@@ -378,11 +383,14 @@ test('on Windows, guided setup recommends a reviewer CLI only when Windows can s
     }, { hasExistingConfig: false, installedPlans, platform });
     return seen;
   };
-  // An npm-only install leaves planProviders empty: nothing is recommended or preselected for Enter.
+  const nothingFound = 'On Windows, the Claude Code and Codex presets need claude.exe or codex.exe from the native installers, and none was found; choose OpenRouter or install one first.';
+  // An npm-only install leaves planProviders empty: nothing is recommended or preselected for Enter,
+  // and the picker says why instead of leaving an unexplained empty default.
   const npmOnly = await modelPicker([], 'win32');
   assert.equal(npmOnly.current, undefined);
   assert.equal(npmOnly.requireSelection, true);
   assert.ok(npmOnly.choices.every(choice => !/\(recommended\)/.test(choice.label)));
+  assert.ok(npmOnly.description.endsWith(` ${nothingFound}`), npmOnly.description);
   // Only codex.exe starts: recommend that, not the Claude Code the user connects.
   const codexOnly = await modelPicker(['codex'], 'win32');
   assert.equal(codexOnly.current, 'codex-economy');
@@ -390,6 +398,8 @@ test('on Windows, guided setup recommends a reviewer CLI only when Windows can s
   assert.match(codexOnly.choices[0].label, /\(recommended\)/);
   // claude.exe starts: the agent the user works in stays the recommendation.
   for (const plans of [['claude'], ['claude', 'codex']]) assert.equal((await modelPicker(plans, 'win32')).current, 'claude-economy');
+  // The note appears only when no runnable CLI was found, and never on other systems.
+  for (const seen of [codexOnly, await modelPicker(['claude'], 'win32'), await modelPicker([], 'linux'), await modelPicker([], 'darwin')]) assert.ok(!seen.description.includes('none was found'), seen.description);
   // Other systems still trust the agent the user selected.
   assert.equal((await modelPicker([], 'linux')).current, 'claude-economy');
 });
