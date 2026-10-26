@@ -180,9 +180,10 @@ export async function claimCheckpointDialog({ request, env = process.env, pid = 
 
 /** Only the reservation owner can release a native dialog or report completion.
  * This status wakes waiters; the Git gate still requires its own valid receipt.
+ * 'abandoned' says no page stayed open, so a waiting retry opens its own.
  */
 export async function finishCheckpointDialog({ id, token, status, env = process.env } = {}) {
-  if (!ID.test(id) || !TOKEN.test(token) || !['passed', 'pending'].includes(status)) throw new Error('Invalid native checkpoint completion.');
+  if (!ID.test(id) || !TOKEN.test(token) || !['passed', 'pending', 'abandoned'].includes(status)) throw new Error('Invalid native checkpoint completion.');
   const file = fileFor(id, env), deadline = Date.now() + 20000;
   let result;
   do {

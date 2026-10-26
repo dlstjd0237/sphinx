@@ -32,6 +32,7 @@ export async function runGitGate({ event, args = [], input = '', cwd = process.c
   revalidate = revalidateSnapshot, present, readYolo = yoloStatus, logOverride = recordOverride,
   queue = queuePresentation, claim = claimPresentation, listRequests = listPresentations,
   output = line => process.stderr.write(`${line}\n`), stamp = scheduleStamp, askInTerminal = runGitTerminalCheck, watchMs = 1000,
+  interview = {},
 } = {}) {
   if (env.SPHINX_EVALUATOR === '1') return 0;
   signal?.throwIfAborted();
@@ -83,7 +84,7 @@ export async function runGitGate({ event, args = [], input = '', cwd = process.c
   const held = pending.length && pending.every(({ session }) => session.held);
 
   const requests = [], skipped = new Set();
-  const browser = present ? null : createBrowserInterview({ env, signal, output });
+  const browser = present ? null : createBrowserInterview({ env, signal, output, ...interview });
   // A settings or source change makes the waiting checks inapplicable (sphinx
   // pending stops listing them). Release Git promptly instead of leaving it
   // blocked on a questionnaire that can no longer approve this operation.

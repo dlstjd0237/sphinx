@@ -112,12 +112,14 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
   reserve = claimCheckpointDialog, release = finishCheckpointDialog, waitForExisting = waitForCheckpointTerminal,
   openBrowser = openQuestionnaireBrowser, notify = notifyDesktop, output = line => process.stderr.write(`${line}\n`), logOverride = recordOverride, findPlans = planProviders,
   loadView = loadChangeView, checkUpdate = updateStatus, planUpdate = updatePlan, startUpdate = scheduleUpdate, watchMs = 1000,
-  terminal = !!process.stderr.isTTY,
+  terminal = !!process.stderr.isTTY, abandonMs = 180000,
 } = {}) {
   const token = randomBytes(32).toString('base64url'), nonce = randomBytes(24).toString('base64');
   let server, origin, url, opened = false, closed = false, active, skip, resolver, sequence = 0, waitingGit = false;
   // Whether the automatic open put the page in front of the person rather than behind their window.
   let openedFront = false;
+  // While set, the check stops once no page has been open for this many ms, and the page says so.
+  let abandonAfterMs;
   // A pause stops the waiting Git operation, and this page's server with it, so
   // the only way back is to run it again. Say so, with the command when known.
   // Cut short at the consent step (only Git or the deadline can), the pass is already saved.
@@ -175,7 +177,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
   // Display-only updates (change view, evidence) keep the revision, so they
   // never turn an answer already in flight into a stale submission.
   const publish = (next, { display = false } = {}) => {
-    state = { ...next, messages: transcript, ...(score ? { score } : {}), ...(update ? { update } : {}), ...(repoName ? { repoName } : {}), ...(models ? { models: { groups: models.groups, reviewing: !!reviewAttempt, busy: grading } } : {}), ...(distance ? { distance: { current: distance.current, next: distance.next, scope: distance.scope } } : {}), ...(stamp ? { stamp } : {}), change: viewState(), evidence: evidence && evidence.checkpoint === next.id ? { questionId: evidence.questionId, refs: evidence.refs } : undefined, waitingGit, operationClosed: closed, revision: display ? next.revision : randomUUID(), sequence: ++sequence };
+    state = { ...next, messages: transcript, ...(score ? { score } : {}), ...(update ? { update } : {}), ...(repoName ? { repoName } : {}), ...(models ? { models: { groups: models.groups, reviewing: !!reviewAttempt, busy: grading } } : {}), ...(distance ? { distance: { current: distance.current, next: distance.next, scope: distance.scope } } : {}), ...(stamp ? { stamp } : {}), change: viewState(), evidence: evidence && evidence.checkpoint === next.id ? { questionId: evidence.questionId, refs: evidence.refs } : undefined, waitingGit, abandonAfterMs, operationClosed: closed, revision: display ? next.revision : randomUUID(), sequence: ++sequence };
     const event = `data: ${JSON.stringify(state)}\n\n`;
     for (const stream of streams) writeEvent(stream, event);
   };
@@ -365,7 +367,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
     requestSignal?.addEventListener('abort', cancel, { once: true });
     if (requestSignal?.aborted) cancel();
     const timer = setTimeout(() => controller.abort(cancelled()), timeoutMs);
-    let reservation, finalStatus = 'pending';
+    let reservation, finalStatus = 'pending', abandonWatch;
     const skipped = async () => {
       // A human chose to let Git continue. Close the check and log it; never write a receipt.
       await store.skip?.(request.id).catch(() => {});
@@ -382,11 +384,16 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
     const store = providedStore || createSessionStore({ env: operationEnv, validate });
     try {
       localSignal.throwIfAborted();
-      reservation = await reserve({ request, env: operationEnv, kind: 'browser' });
-      if (reservation?.status !== 'claimed') {
+      for (;;) {
+        reservation = await reserve({ request, env: operationEnv, kind: 'browser' });
+        if (reservation?.status === 'claimed') break;
         const status = await waitForExisting({ id: request.id, env: operationEnv, timeoutMs, signal: localSignal });
+        // Nobody kept that page open, so this one asks instead. The pause keeps a lock another
+        // process still holds from turning this into a busy loop, as for the other lock waits.
+        if (status === 'abandoned') { await delay(50, undefined, { signal: localSignal }); continue; }
         // Passed in another window while Git waits on this one: this page still asks before it goes through.
         if (status !== 'passed' || !waitingGit || request.more) return { status: status === 'passed' || status === 'stopped' ? status : 'pending', id: request.id };
+        break;
       }
       const session = await store.read(request.id), config = await readConfig(request.repoRoot, operationEnv);
       if (session.snapshot.repoRoot !== request.repoRoot) throw new Error('This checkpoint belongs to another repository.');
@@ -395,7 +402,23 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
       await refreshScore(request.repoRoot, operationEnv).catch(() => {});
       let visible = store.public(session);
       publish({ ...publicFields(visible), repoRoot: request.repoRoot, phase: 'working', message: 'Preparing your understanding check…' });
-      await ensureServer(operationEnv, { front: unattendedGit(request, { env: operationEnv, terminal }) });
+      const unattended = unattendedGit(request, { env: operationEnv, terminal });
+      await ensureServer(operationEnv, { front: unattended });
+      // A Git client shows nothing while its hook waits, and a push it cancelled can leave the hook
+      // waiting: once no page has stayed open for abandonMs, stop as the deadline does.
+      if (unattended && openedFront) {
+        const [op] = words(session.snapshot.event), minutes = Math.max(1, Math.round(abandonMs / 60000));
+        let lastSeen = Date.now();
+        abandonAfterMs = abandonMs;
+        abandonWatch = setInterval(() => {
+          if (streams.size) lastSeen = Date.now();
+          else if (Date.now() - lastSeen >= abandonMs && !controller.signal.aborted) {
+            output(`Sphinx: no questionnaire page was open for ${minutes} minute${minutes === 1 ? '' : 's'}, so this ${op} stopped. Your progress is saved; ${op} again to reopen the questionnaire.`);
+            finalStatus = 'abandoned'; controller.abort(cancelled());
+          }
+        }, watchMs);
+        abandonWatch.unref();
+      }
       const notes = [];
       const recoveryUI = { warning: text => notes.push(text), note: text => notes.push(text), command: () => {} };
       const plans = await findPlans(operationEnv).catch(() => []);
@@ -576,6 +599,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
       else publish({ ...publicFields(state), repoRoot: request.repoRoot, phase: localSignal.aborted ? 'paused' : 'error', message: localSignal.aborted ? pauseMessage() : 'The check could not finish. Saved progress and completed checkpoints are retained.', ...(localSignal.aborted ? (resumeCommand ? { resume: resumeCommand } : {}) : { error: error.message }) });
       return { status: 'pending', id: request.id };
     } finally {
+      clearInterval(abandonWatch); abandonAfterMs = undefined;
       clearTimeout(timer); requestSignal?.removeEventListener('abort', cancel); resolver?.reject(cancelled()); resolver = undefined;
       if (reservation?.status === 'claimed') await release({ id: request.id, token: reservation.token, status: finalStatus, env: operationEnv });
       // Write settings chosen for future checks on close(). Distance is part of a

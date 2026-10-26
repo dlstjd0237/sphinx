@@ -138,6 +138,81 @@ test('the page opens in front only for an unattended Git hook, and the output sa
   assert.deepEqual((await opening({ result: false })).said, ['Sphinx: open the local URL above. No application was brought to the foreground.']);
 });
 
+// A Git client's hook: nobody at a terminal, and the page opened in front. The clock is shortened.
+const unattended = { terminal: false, openBrowser: async () => 'foreground', abandonMs: 50, watchMs: 10 };
+const stops = f => f.output.filter(line => line.includes('no questionnaire page was open'));
+// A browser tab on the page: it follows the page's event stream until it is closed.
+const openPage = url => new Promise((resolve, reject) => {
+  const request = get(`${url}/events`, response => response.once('data', () => resolve(() => { response.destroy(); request.destroy(); })));
+  request.once('error', reject);
+});
+// The browser shows the page as it opens it, so the page is there before the clock starts.
+const showing = pages => ({ ...unattended, openBrowser: async url => { pages.push(await openPage(url)); return 'foreground'; } });
+
+test('an unattended GUI wait stops after the page stays closed', async t => {
+  const f = await fixture(t, { interviewOptions: unattended }), done = f.present();
+  let rule;
+  for (let i = 0; i < 300 && !rule; i++) { rule = f.interview.state.abandonAfterMs; if (!rule) await delay(1); }
+  assert.equal(rule, 50, 'the page is told while it waits');
+  assert.deepEqual(await done, { status: 'pending', id: f.snapshot.id });
+  assert.deepEqual(stops(f), ['Sphinx: no questionnaire page was open for 1 minute, so this push stopped. Your progress is saved; push again to reopen the questionnaire.']);
+  assert.equal((await checkpointTerminalStatus({ id: f.snapshot.id, env: f.env })).status, 'abandoned');
+});
+
+test('an open page keeps the unattended wait alive and a quick reconnect does not stop it', async t => {
+  const pages = [], f = await fixture(t, { interviewOptions: showing(pages) }), done = f.present();
+  await f.waitFor('question');
+  for (let tick = 0; tick < 10; tick++) { await delay(10); assert.equal(f.interview.state.phase, 'question'); }
+  // A reload: the stream drops, and the page is back within 20 ms.
+  pages.pop()(); await delay(10); pages.push(await openPage(f.interview.url));
+  await delay(100);
+  assert.equal(f.interview.state.phase, 'question');
+  await f.post('answer', { response: 'Yes, the insert is repeated.' }); await f.confirm();
+  assert.equal((await done).status, 'passed');
+  assert.deepEqual(stops(f), []);
+  pages.pop()();
+});
+
+test('attended terminals, background tabs and unopened pages never stop early', async t => {
+  for (const [terminal, how] of [[true, 'foreground'], [false, 'background'], [false, false]]) {
+    const f = await fixture(t, { interviewOptions: { ...unattended, terminal, openBrowser: async () => how } }), done = f.present();
+    await f.waitFor('question'); await delay(200);
+    assert.deepEqual(stops(f), [], `terminal: ${terminal}, opened: ${how}`);
+    assert.notEqual(f.interview.state.phase, 'paused');
+    assert.equal(f.interview.state.abandonAfterMs, undefined, 'the page is not told of a rule that does not apply');
+    await f.post('pause'); assert.equal((await done).status, 'pending');
+  }
+});
+
+test('a retry waiting on another page keeps waiting, and takes over when that page is abandoned', async t => {
+  const pages = [], f = await fixture(t, { interviewOptions: showing(pages) });
+  // The hook of a push the Git client cancelled lives on and still holds the page.
+  const orphan = await claimCheckpointDialog({ request: f.request, env: f.env, kind: 'browser' });
+  assert.equal(orphan.status, 'claimed');
+  const done = f.present(); await delay(200);
+  assert.equal(f.interview.url, undefined, 'it only waits, so its own clock never starts');
+  assert.deepEqual(stops(f), []);
+  await finishCheckpointDialog({ id: f.snapshot.id, token: orphan.token, status: 'abandoned', env: f.env });
+  await f.waitFor('question');
+  assert.ok(f.interview.url, 'it opens its own page');
+  await f.post('pause'); assert.equal((await done).status, 'pending');
+  pages.pop()();
+});
+
+test('no stray stop after Continue or Skip', async t => {
+  for (const end of ['proceed', 'skip']) {
+    const pages = [], f = await fixture(t, { interviewOptions: showing(pages) }), done = f.present();
+    await f.waitFor('question');
+    if (end === 'skip') assert.equal((await f.post('skip', { response: 'prod is down' })).status, 200);
+    else { await f.post('answer', { response: 'Yes, the insert is repeated.' }); await f.confirm(); }
+    pages.pop()();
+    assert.equal((await done).status, end === 'skip' ? 'skipped' : 'passed');
+    await delay(100);
+    assert.deepEqual(stops(f), [], end);
+    assert.equal((await checkpointTerminalStatus({ id: f.snapshot.id, env: f.env })).status, end === 'skip' ? 'pending' : 'passed');
+  }
+});
+
 test('local page requires its token and rejects cross-origin, rebinding, and stale submissions', async t => {
   const f = await fixture(t), done = f.present(); const current = await f.waitFor('question');
   const page = await fetch(f.interview.url); const html = await page.text();
