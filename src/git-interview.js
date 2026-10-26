@@ -65,9 +65,10 @@ export function prefersTerminal(config, { env = process.env, platform = process.
 }
 
 // The terminal Git was run from, if a person is looking at it. A coding
-// agent's shell has no visible terminal, so its pipes never qualify.
-function openVisibleTerminal(stderr = process.stderr) {
-  if (!stderr.isTTY) return null;
+// agent's shell has no visible terminal, so its pipes never qualify. Never on
+// Windows, where /dev/tty is <current drive>:\dev\tty, a path a user may control.
+export function openVisibleTerminal(stderr = process.stderr, platform = process.platform) {
+  if (platform === 'win32' || !stderr.isTTY) return null;
   try { return openSync('/dev/tty', 'r+'); } catch { return null; }
 }
 

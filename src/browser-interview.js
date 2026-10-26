@@ -18,6 +18,8 @@ import { updateStatus, updatePlan, scheduleUpdate } from './update.js';
 import { modelChoices, validChoice } from './model-choices.js';
 import { setRepositoryDistance } from './repo-config.js';
 import { pullRequestPush, usesSphinxAction } from './github.js';
+import { SESSION_ENV } from './activation.js';
+import { envValue } from './windows.js';
 
 const ID = /^[a-f0-9]{64}$/u;
 const cancelled = () => Object.assign(new Error('Check paused. Progress is saved.'), { code: 'SPHINX_CANCELLED' });
@@ -42,22 +44,44 @@ export function notifyDesktop({ title, message, env = process.env, platform = pr
   } catch { return false; }
 }
 
-/** macOS has an explicit background-open flag. Elsewhere print the local URL;
- * do not guess at window-manager focus rules or invoke a foreground opener. */
-export async function openQuestionnaireBrowser(url, { env = process.env, platform = process.platform, spawnImpl = spawn } = {}) {
-  if (offLimits(env) || env.SSH_CONNECTION || env.SSH_TTY || platform !== 'darwin') return false;
+/** The page is the only cue a Git client without a terminal can give, so Windows opens it in front. macOS has an
+ * explicit background-open flag and uses it, unless `front` says nobody watches a terminal or a coding agent.
+ * Elsewhere print the local URL; do not guess at window-manager focus rules or invoke a foreground opener.
+ * Resolves 'background', 'foreground', or false when the page was not opened. */
+export async function openQuestionnaireBrowser(url, { env = process.env, platform = process.platform, spawnImpl = spawn, front = false } = {}) {
+  if (offLimits(env) || env.SSH_CONNECTION || env.SSH_TTY || !['darwin', 'win32'].includes(platform)) return false;
   const parsed = new URL(url);
   if (parsed.protocol !== 'http:' || parsed.hostname !== '127.0.0.1' || !parsed.port) throw new Error('Invalid local questionnaire URL.');
+  if (platform === 'win32') {
+    // Run from System32, not the repository: a browser this call starts would keep that folder locked. rundll32 is a
+    // GUI program, so no windowsHide. Its exit code is always 0 and says nothing, and it is not detached, so it is
+    // never killed or waited for: it ends with the hook at the latest, while a browser it started lives on.
+    const system32 = path.win32.join(envValue(env, 'SystemRoot', 'win32') ?? process.env.SystemRoot ?? 'C:\\Windows', 'System32');
+    const clean = Object.fromEntries(Object.entries(env).filter(([key]) => !/^(GIT_|SPHINX_)/i.test(key)));
+    return new Promise(resolve => {
+      let child;
+      try { child = spawnImpl(path.win32.join(system32, 'rundll32.exe'), ['url.dll,FileProtocolHandler', url], { cwd: system32, env: clean, stdio: 'ignore' }); }
+      catch { resolve(false); return; }
+      child.once('spawn', () => resolve('foreground'));
+      child.on('error', () => resolve(false)); // after 'spawn' the promise is settled, so a late error only has to be heard
+      child.on('exit', () => {});
+    });
+  }
   return new Promise(resolve => {
     let child, timer, settled = false;
     const finish = value => { if (!settled) { settled = true; clearTimeout(timer); resolve(value); } };
-    try { child = spawnImpl('/usr/bin/open', ['-g', url], { env, stdio: 'ignore' }); }
+    try { child = spawnImpl('/usr/bin/open', front ? [url] : ['-g', url], { env, stdio: 'ignore' }); }
     catch { finish(false); return; }
     child.once('error', () => finish(false));
-    child.once('exit', code => finish(code === 0));
+    child.once('exit', code => finish(code === 0 ? (front ? 'foreground' : 'background') : false));
     timer = setTimeout(() => { child.kill(); finish(false); }, 5000);
   });
 }
+
+/** Git is waiting on this hook, yet no person looks at a terminal and no known coding agent started it: a Git client
+ * with a window of its own (Sourcetree, Fork, GitHub Desktop) or a script. `env` is the operation's environment and
+ * `terminal` says whether Git's stderr is a terminal. */
+export const unattendedGit = (request, { env, terminal }) => request?.delivery === 'hook' && !request.host && !SESSION_ENV.some(key => env[key]) && !terminal;
 
 async function readBody(req, limit) {
   let bytes = 0; const chunks = [];
@@ -86,9 +110,12 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
   reserve = claimCheckpointDialog, release = finishCheckpointDialog, waitForExisting = waitForCheckpointTerminal,
   openBrowser = openQuestionnaireBrowser, notify = notifyDesktop, output = line => process.stderr.write(`${line}\n`), logOverride = recordOverride, findPlans = planProviders,
   loadView = loadChangeView, checkUpdate = updateStatus, planUpdate = updatePlan, startUpdate = scheduleUpdate, watchMs = 1000,
+  terminal = !!process.stderr.isTTY,
 } = {}) {
   const token = randomBytes(32).toString('base64url'), nonce = randomBytes(24).toString('base64');
   let server, origin, url, opened = false, closed = false, active, skip, resolver, sequence = 0, waitingGit = false;
+  // Whether the automatic open put the page in front of the person rather than behind their window.
+  let openedFront = false;
   // A pause stops the waiting Git operation, and this page's server with it, so
   // the only way back is to run it again. Say so, with the command when known.
   // Cut short at the consent step (only Git or the deadline can), the pass is already saved.
@@ -270,7 +297,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
     publish({ ...publicFields(state), phase: 'working', message: data.action === 'answer' ? 'Checking your reasoning…' : data.action === 'learn' ? 'Preparing an explanation…' : data.action === 'dispute' ? 'Reviewing the question…' : 'Continuing the review…' });
     send(res, 202, state); current.resolve(data);
   }
-  async function ensureServer(operationEnv) {
+  async function ensureServer(operationEnv, { front }) {
     if (server) return;
     server = createServer((req, res) => {
       res.on('error', () => res.destroy());
@@ -287,8 +314,11 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
     output(`Sphinx questionnaire: ${url}`);
     if (!opened) {
       opened = true;
-      const automatic = await Promise.resolve().then(() => openBrowser(url, { env: operationEnv })).catch(() => false);
-      output(automatic ? 'Sphinx: questionnaire opened in a background browser tab. Your coding window stays in place.' : 'Sphinx: open the local URL above. No application was brought to the foreground.');
+      const how = await Promise.resolve().then(() => openBrowser(url, { env: operationEnv, front })).catch(() => false);
+      openedFront = how === 'foreground';
+      output(how === 'foreground' ? 'Sphinx: questionnaire opened in your browser.'
+        : how === 'background' ? 'Sphinx: questionnaire opened in a background browser tab. Your coding window stays in place.'
+        : 'Sphinx: open the local URL above. No application was brought to the foreground.');
     }
   }
   function startView(request, snapshot, config, operationEnv, store) {
@@ -363,7 +393,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
       await refreshScore(request.repoRoot, operationEnv).catch(() => {});
       let visible = store.public(session);
       publish({ ...publicFields(visible), repoRoot: request.repoRoot, phase: 'working', message: 'Preparing your understanding check…' });
-      await ensureServer(operationEnv);
+      await ensureServer(operationEnv, { front: unattendedGit(request, { env: operationEnv, terminal }) });
       const notes = [];
       const recoveryUI = { warning: text => notes.push(text), note: text => notes.push(text), command: () => {} };
       const plans = await findPlans(operationEnv).catch(() => []);
@@ -447,7 +477,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
       while (visible.status !== 'passed') {
         localSignal.throwIfAborted();
         showQuestion(visible); refreshEvidence(request.id);
-        // The page opened in a background tab; say once that questions are ready.
+        // The page may be in a background tab; say once that questions are ready.
         if (!notified) { notified = true; notify({ title: 'Sphinx needs your answers', message: where, env: operationEnv }); }
         // Answers can also arrive from sphinx answer or a terminal check. Follow
         // the saved session so this page, and the Git operation waiting on it, keep up.

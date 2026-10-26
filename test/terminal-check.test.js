@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { Writable } from 'node:stream';
 import { runTerminalCheck } from '../src/terminal-check.js';
 import { createTerminal } from '../src/terminal.js';
-import { prefersTerminal, runGitTerminalCheck } from '../src/git-interview.js';
+import { openVisibleTerminal, prefersTerminal, runGitTerminalCheck } from '../src/git-interview.js';
 import { DEFAULT_CONFIG, policyHash, validateConfig, validateRepositoryConfig } from '../src/config.js';
 
 const question = (id, prompt, extra = {}) => ({ id, prompt, choices: [], ...extra });
@@ -201,6 +203,19 @@ test('Git asks inline on its own terminal, else opens a window', async () => {
   assert.equal(more.SPHINX_MORE_CHECKS, '1', 'an earlier destination of the push does not ask to continue yet');
   const windowed = await runGitTerminalCheck({ request: { id: 'abc' }, openTty: () => null, openWindow: async () => ({ status: 'unavailable' }) });
   assert.equal(windowed.status, 'unavailable');
+});
+
+test('Windows never looks for /dev/tty, which would resolve to a file on the current drive', t => {
+  const opened = [];
+  t.mock.method(fs, 'openSync', (file, flags) => { opened.push([file, flags]); return 99; });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  assert.equal(openVisibleTerminal({ isTTY: true }, 'win32'), null);
+  assert.deepEqual(opened, []);
+  assert.equal(openVisibleTerminal({ isTTY: false }, 'linux'), null, "a coding agent's shell has no visible terminal");
+  assert.deepEqual(opened, []);
+  assert.equal(openVisibleTerminal({ isTTY: true }, 'linux'), 99, 'elsewhere the terminal Git was run from is opened as before');
+  assert.deepEqual(opened, [['/dev/tty', 'r+']]);
 });
 
 test('interface is a personal setting outside the policy hash', () => {

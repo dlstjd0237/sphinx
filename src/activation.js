@@ -11,7 +11,7 @@ import { terminalCommand, spawnTerminal, createTerminalEnvironmentBridge, readTe
 const WORKER = fileURLToPath(new URL('./activation-worker.js', import.meta.url));
 const AGENTS = ['codex', 'claude', 'pi', 'cursor', 'opencode'];
 const TOKEN = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
-const SESSION_ENV = ['CODEX_THREAD_ID', 'CLAUDECODE', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT', 'PI_SESSION_ID', 'SPHINX_CLAUDE_SESSION', 'SPHINX_CURSOR_SESSION', 'SPHINX_OPENCODE_SESSION'];
+export const SESSION_ENV = ['CODEX_THREAD_ID', 'CLAUDECODE', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT', 'PI_SESSION_ID', 'SPHINX_CLAUDE_SESSION', 'SPHINX_CURSOR_SESSION', 'SPHINX_OPENCODE_SESSION'];
 const LABELS = { codex: 'Codex', claude: 'Claude Code', pi: 'Pi', cursor: 'Cursor', opencode: 'OpenCode' };
 export const WINDOWS_ACTIVATION_NOTE = 'Sphinx does not open clients on Windows. Start a new Claude Code session in this repository to load Sphinx.';
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;

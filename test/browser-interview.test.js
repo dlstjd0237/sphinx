@@ -7,7 +7,8 @@ import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createBrowserInterview, notifyDesktop, openQuestionnaireBrowser } from '../src/browser-interview.js';
+import { createBrowserInterview, notifyDesktop, openQuestionnaireBrowser, unattendedGit } from '../src/browser-interview.js';
+import { SESSION_ENV } from '../src/activation.js';
 import { createSessionStore } from '../src/sessions.js';
 import { DEFAULT_CONFIG } from '../src/config.js';
 import { claimCheckpointDialog, checkpointTerminalStatus, finishCheckpointDialog } from '../src/terminal-launch.js';
@@ -27,7 +28,7 @@ async function fixture(t, { generate, grade, maxModelCalls = 20, validate = asyn
   });
   await store.ensure(snapshot, config);
   const controller = new AbortController(), output = [];
-  const interview = createBrowserInterview({ notify: () => false, env, signal: controller.signal, store, readConfig: async () => config, revalidate: async () => { await validate(); return true; }, openBrowser: async () => { opened++; return true; }, output: text => output.push(text), findPlans: async () => plans, checkUpdate: async () => null, ...interviewOptions });
+  const interview = createBrowserInterview({ notify: () => false, env, signal: controller.signal, store, readConfig: async () => config, revalidate: async () => { await validate(); return true; }, openBrowser: async () => { opened++; return 'background'; }, output: text => output.push(text), findPlans: async () => plans, checkUpdate: async () => null, ...interviewOptions });
   const request = { id: snapshot.id, token: randomUUID(), repoRoot, delivery: 'hook', createdAt: Date.now() };
   const tasks = [];
   const present = (next = request) => { const task = interview.present({ request: next }); tasks.push(task); return task; };
@@ -53,9 +54,88 @@ test('browser launch uses only macOS background open and never activates or mini
   const result = await openQuestionnaireBrowser('http://127.0.0.1:12345/token', { platform: 'darwin', env: {}, spawnImpl: (command, args, options) => {
     invocation = { command, args, options }; const child = new EventEmitter(); setImmediate(() => child.emit('exit', 0)); return child;
   } });
-  assert.equal(result, true); assert.equal(invocation.command, '/usr/bin/open'); assert.deepEqual(invocation.args, ['-g', 'http://127.0.0.1:12345/token']);
+  assert.equal(result, 'background'); assert.equal(invocation.command, '/usr/bin/open'); assert.deepEqual(invocation.args, ['-g', 'http://127.0.0.1:12345/token']);
   assert.doesNotMatch(JSON.stringify(invocation), /activate|minimiz|frontmost|osascript/);
-  for (const options of [{ platform: 'linux', env: { DISPLAY: ':1' } }, { platform: 'darwin', env: { SSH_TTY: '/dev/tty' } }, { platform: 'darwin', env: { CI: '1' } }]) assert.equal(await openQuestionnaireBrowser('http://127.0.0.1:12345/token', { ...options, spawnImpl: () => assert.fail('must not invoke a foreground launcher') }), false);
+  // The opener swallows a launcher that throws, so count the launches instead of failing inside the stub.
+  let launched = 0;
+  for (const options of [{ platform: 'linux', env: { DISPLAY: ':1' } }, { platform: 'linux', env: { DISPLAY: ':1' }, front: true }, { platform: 'darwin', env: { SSH_TTY: '/dev/tty' } }, { platform: 'darwin', env: { CI: '1' } }]) assert.equal(await openQuestionnaireBrowser('http://127.0.0.1:12345/token', { ...options, spawnImpl: () => { launched++; throw new Error('must not invoke a foreground launcher'); } }), false);
+  assert.equal(launched, 0, 'must not invoke a foreground launcher');
+});
+
+test('on Windows the page opens in front through rundll32, with no shell, no hide flag, and no Git or Sphinx variables', { timeout: 5000 }, async () => {
+  const url = 'http://127.0.0.1:12345/token', child = new EventEmitter();
+  let invocation, killed = false;
+  child.kill = () => { killed = true; };
+  // The stub only ever spawns. rundll32's exit code is always 0 and says nothing, so the answer cannot wait for the exit.
+  const result = await openQuestionnaireBrowser(url, { platform: 'win32', env: { SYSTEMROOT: 'D:\\Win', GIT_DIR: 'x', git_index_file: 'i', SPHINX_HOME: 'y', KEEP: 'z' }, spawnImpl: (command, args, options) => {
+    invocation = { command, args, options }; setImmediate(() => child.emit('spawn')); return child;
+  } });
+  assert.equal(result, 'foreground');
+  assert.equal(invocation.command, 'D:\\Win\\System32\\rundll32.exe'); assert.deepEqual(invocation.args, ['url.dll,FileProtocolHandler', url]);
+  assert.equal(invocation.options.cwd, 'D:\\Win\\System32', 'a browser this starts must not hold the repository folder');
+  assert.equal(invocation.options.env.KEEP, 'z'); assert.deepEqual(Object.keys(invocation.options.env).filter(key => /^(GIT_|SPHINX_)/i.test(key)), []);
+  assert.equal(invocation.options.stdio, 'ignore'); assert.equal(Object.hasOwn(invocation.options, 'windowsHide'), false, 'rundll32 is a GUI program'); assert.equal(invocation.options.shell, undefined);
+  assert.equal(killed, false);
+  assert.doesNotThrow(() => { child.emit('error', new Error('late')); child.emit('exit', 0); }, 'a late error or the exit must not crash the hook');
+  assert.equal(killed, false, 'rundll32 is never killed');
+});
+
+test('on Windows the program folder comes from SystemRoot in any letter case, else from this process, else C:\\Windows', { timeout: 5000 }, async () => {
+  const url = 'http://127.0.0.1:12345/token', launched = [];
+  const spawnImpl = (command, _args, options) => { launched.push([command, options.cwd]); const child = new EventEmitter(); setImmediate(() => child.emit('spawn')); return child; };
+  for (const key of ['SystemRoot', 'SYSTEMROOT', 'systemroot']) await openQuestionnaireBrowser(url, { platform: 'win32', env: { [key]: 'E:\\W' }, spawnImpl });
+  assert.deepEqual(launched, Array(3).fill(['E:\\W\\System32\\rundll32.exe', 'E:\\W\\System32']));
+  launched.length = 0;
+  await openQuestionnaireBrowser(url, { platform: 'win32', env: {}, spawnImpl });
+  const [[command, cwd]] = launched;
+  assert.equal(command, path.win32.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'rundll32.exe')); assert.equal(cwd, path.win32.dirname(command));
+});
+
+test('on Windows a launch that fails or is not allowed reports the page as not opened, and only the local page may be opened', { timeout: 5000 }, async () => {
+  const url = 'http://127.0.0.1:12345/token';
+  const failing = new EventEmitter();
+  assert.equal(await openQuestionnaireBrowser(url, { platform: 'win32', env: {}, spawnImpl: () => { setImmediate(() => failing.emit('error', Object.assign(new Error('spawn rundll32.exe ENOENT'), { code: 'ENOENT' }))); return failing; } }), false);
+  assert.equal(await openQuestionnaireBrowser(url, { platform: 'win32', env: {}, spawnImpl: () => { throw new Error('spawn EACCES'); } }), false);
+  let started = 0;
+  const spawnImpl = () => { started++; throw new Error('must not start a program'); };
+  for (const env of [{ CI: '1' }, { SPHINX_EVALUATOR: '1' }, { SSH_CONNECTION: 'remote' }, { SSH_TTY: '/dev/pts/1' }]) assert.equal(await openQuestionnaireBrowser(url, { platform: 'win32', env, spawnImpl }), false);
+  for (const other of ['http://example.com:80/x', 'http://localhost:12345/x', 'http://127.0.0.1/x', 'https://127.0.0.1:12345/x']) await assert.rejects(openQuestionnaireBrowser(other, { platform: 'win32', env: {}, spawnImpl }), { message: 'Invalid local questionnaire URL.' });
+  assert.equal(started, 0);
+});
+
+test('on macOS a foreground open uses plain open, and a refused open is not reported as opened', async () => {
+  const url = 'http://127.0.0.1:12345/token';
+  let invocation;
+  const exits = code => (command, args, options) => { invocation = { command, args, options }; const child = new EventEmitter(); setImmediate(() => child.emit('exit', code)); return child; };
+  assert.equal(await openQuestionnaireBrowser(url, { platform: 'darwin', env: {}, front: true, spawnImpl: exits(0) }), 'foreground');
+  assert.equal(invocation.command, '/usr/bin/open'); assert.deepEqual(invocation.args, [url]);
+  assert.equal(await openQuestionnaireBrowser(url, { platform: 'darwin', env: {}, front: true, spawnImpl: exits(1) }), false);
+  assert.equal(await openQuestionnaireBrowser(url, { platform: 'darwin', env: {}, spawnImpl: exits(1) }), false);
+});
+
+test('Git is unattended only for a hook that no coding agent runs and no terminal shows', () => {
+  const hook = { delivery: 'hook' };
+  assert.equal(unattendedGit(hook, { env: {}, terminal: false }), true);
+  assert.equal(unattendedGit({ ...hook, host: 'claude' }, { env: {}, terminal: false }), false, 'a coding agent session asked for it');
+  for (const key of ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', ...SESSION_ENV]) assert.equal(unattendedGit(hook, { env: { [key]: '1' }, terminal: false }), false, key);
+  assert.equal(unattendedGit(hook, { env: {}, terminal: true }), false, 'a person is looking at a terminal');
+  assert.equal(unattendedGit({}, { env: {}, terminal: false }), false, 'no Git hook is waiting');
+  assert.equal(unattendedGit(undefined, { env: {}, terminal: false }), false);
+});
+
+test('the page opens in front only for an unattended Git hook, and the output says how it opened', async t => {
+  const opening = async ({ interviewOptions, request, env, result = 'foreground' } = {}) => {
+    const calls = [], f = await fixture(t, { interviewOptions: { terminal: false, openBrowser: async (_url, options) => { calls.push(options); return result; }, ...interviewOptions } });
+    const done = env ? f.interview.present({ request: { ...f.request, ...request }, env: { ...f.env, ...env } }) : f.present({ ...f.request, ...request });
+    await f.waitFor('question'); await f.post('pause'); await done;
+    return { front: calls.map(options => options.front), said: f.output.filter(line => line.startsWith('Sphinx: ')) };
+  };
+  assert.deepEqual(await opening(), { front: [true], said: ['Sphinx: questionnaire opened in your browser.'] });
+  assert.deepEqual((await opening({ request: { host: 'claude' } })).front, [false], 'a coding agent hook');
+  assert.deepEqual((await opening({ env: { CLAUDE_CODE_ENTRYPOINT: 'cli' } })).front, [false], 'the operation environment decides, not the interview default');
+  assert.deepEqual((await opening({ interviewOptions: { terminal: true } })).front, [false], 'a person at a terminal');
+  assert.deepEqual((await opening({ result: 'background' })).said, ['Sphinx: questionnaire opened in a background browser tab. Your coding window stays in place.']);
+  assert.deepEqual((await opening({ result: false })).said, ['Sphinx: open the local URL above. No application was brought to the foreground.']);
 });
 
 test('local page requires its token and rejects cross-origin, rebinding, and stale submissions', async t => {
