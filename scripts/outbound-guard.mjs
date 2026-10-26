@@ -3,6 +3,7 @@ import https from 'node:https';
 import net from 'node:net';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
+import path from 'node:path';
 import { promisify } from 'node:util';
 
 // Test-only preload. Production/eval entry points never import this module.
@@ -54,7 +55,19 @@ if (!globalThis[installed]) {
     env.NODE_OPTIONS = current.includes(import.meta.url) ? current : `${current} ${preload}`.trim();
     return { ...options, env };
   };
+  // Windows cannot start the extensionless fixture CLIs that POSIX runs put first on PATH,
+  // so a bare `claude`, `codex`, or `gh` would fall through to the developer's real install.
+  // Both the wrapped functions and their promisify.custom variants call injected(), so both refuse.
+  const realClis = new Set(['claude', 'codex', 'gh']);
+  const refuseRealCli = (args, kind) => {
+    if (process.platform !== 'win32' || typeof args[0] !== 'string') return;
+    const program = kind === 'exec' ? args[0].trim().match(/^"[^"]*"|^'[^']*'|^\S*/u)[0].replace(/["']/gu, '') : args[0];
+    if (realClis.has(path.win32.basename(program).toLowerCase().replace(/\.(?:exe|cmd|bat|com)$/u, ''))) {
+      throw Object.assign(new Error('Unit tests cannot start a real provider or GitHub CLI on Windows. Use an injected runner or a fixture.'), { code: 'SPHINX_TEST_CLI_BLOCKED' });
+    }
+  };
   const injected = (args, kind) => {
+    refuseRealCli(args, kind);
     const out = [...args];
     const index = kind === 'exec' ? 1 : Array.isArray(out[1]) || (out[1] == null && out[2] && typeof out[2] === 'object') ? 2 : 1;
     if (out[index] == null || typeof out[index] === 'object') out[index] = guardedOptions(out[index]);
