@@ -9,6 +9,7 @@ import { dropContext } from './working-context.js';
 import { collectGarbage } from './storage.js';
 import { scheduleStamp } from './github.js';
 import { prefersTerminal, runGitTerminalCheck } from './git-interview.js';
+import { stderrLine } from './terminal.js';
 
 async function snapshotsFor({ event, args, input, cwd, config, env }) {
   if (event === 'pre-push') return pushSnapshots({ cwd, remote: args[0], remoteUrl: args[1], input, config, env });
@@ -31,7 +32,7 @@ export async function runGitGate({ event, args = [], input = '', cwd = process.c
   store: providedStore, readConfig = loadConfig, snapshotsFor: collectSnapshots = snapshotsFor,
   revalidate = revalidateSnapshot, present, readYolo = yoloStatus, logOverride = recordOverride,
   queue = queuePresentation, claim = claimPresentation, listRequests = listPresentations,
-  output = line => process.stderr.write(`${line}\n`), stamp = scheduleStamp, askInTerminal = runGitTerminalCheck, watchMs = 1000,
+  output = stderrLine, stamp = scheduleStamp, askInTerminal = runGitTerminalCheck, watchMs = 1000,
   interview = {},
 } = {}) {
   if (env.SPHINX_EVALUATOR === '1') return 0;

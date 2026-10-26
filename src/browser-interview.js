@@ -20,6 +20,7 @@ import { setRepositoryDistance } from './repo-config.js';
 import { pullRequestPush, usesSphinxAction } from './github.js';
 import { SESSION_ENV } from './activation.js';
 import { envValue } from './windows.js';
+import { stderrLine } from './terminal.js';
 
 const ID = /^[a-f0-9]{64}$/u;
 const cancelled = () => Object.assign(new Error('Check paused. Progress is saved.'), { code: 'SPHINX_CANCELLED' });
@@ -110,7 +111,7 @@ function publicFields(state) {
 export function createBrowserInterview({ env = process.env, signal, timeoutMs = 25 * 60 * 1000,
   store: providedStore, readConfig = loadConfig, revalidate = revalidateSnapshot,
   reserve = claimCheckpointDialog, release = finishCheckpointDialog, waitForExisting = waitForCheckpointTerminal,
-  openBrowser = openQuestionnaireBrowser, notify = notifyDesktop, output = line => process.stderr.write(`${line}\n`), logOverride = recordOverride, findPlans = planProviders,
+  openBrowser = openQuestionnaireBrowser, notify = notifyDesktop, output = stderrLine, logOverride = recordOverride, findPlans = planProviders,
   loadView = loadChangeView, checkUpdate = updateStatus, planUpdate = updatePlan, startUpdate = scheduleUpdate, watchMs = 1000,
   terminal = !!process.stderr.isTTY, abandonMs = 180000,
 } = {}) {
