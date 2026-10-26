@@ -415,17 +415,23 @@ test('on Windows, guided setup offers only Claude Code and preselects it once it
   const f = await fixture(t);
   // The preload makes the piped stdin look like a terminal. With every other choice given, one Enter answers the only question.
   const looksLikeTerminal = "data:text/javascript,Object.defineProperty(process.stdin,'isTTY',{value:true})";
-  const guided = () => f.run(process.execPath, ['--import', looksLikeTerminal, CLI, 'install', '--no-launch', '--preset', 'claude-economy', '--events', 'pre-push', '--branches', 'main', '--remotes', '*', '--level', 'standard', '--distance', 'high'], { input: '\n' });
+  const guided = (...launch) => f.run(process.execPath, ['--import', looksLikeTerminal, CLI, 'install', ...launch, '--preset', 'claude-economy', '--events', 'pre-push', '--branches', 'main', '--remotes', '*', '--level', 'standard', '--distance', 'high'], { input: '\n' });
   const fresh = guided();
   assert.equal(fresh.status, 0, fresh.stderr);
   assert.match(fresh.stdout, /2\. \[ \] Claude Code/);
   assert.doesNotMatch(fresh.stdout, /\[.\] (?:Codex|Pi|Cursor|OpenCode)/);
   assert.match(fresh.stdout, /Agent integrations +none/);
+  assert.doesNotMatch(fresh.stdout, /opens selected installed clients/); // Nothing is chosen, so nothing to promise either.
   f.cli('install', '--yes', '--agents', 'claude');
-  const connected = guided();
+  const connected = guided('--no-launch');
   assert.equal(connected.status, 0, connected.stderr);
   assert.match(connected.stdout, /2\. \[x\] Claude Code/);
   assert.match(connected.stdout, /Agent integrations +claude/);
+  // The default path (no --no-launch) is the one that opens clients elsewhere. Sphinx opens none on Windows, so it neither promises to nor reports a failed attempt, and the note appears once.
+  const launched = guided();
+  assert.equal(launched.status, 0, launched.stderr);
+  assert.doesNotMatch(launched.stdout, /opens selected installed clients|Not opened/);
+  assert.equal(squash(launched.stdout).split(WINDOWS_NOTE).length - 1, 1);
 });
 
 test('contradictory launch flags and repository-only launches fail before installation', async t => {

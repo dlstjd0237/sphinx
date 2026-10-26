@@ -287,7 +287,8 @@ async function installCommand(initial) {
   }
   if (!initial.yes && !process.stdin.isTTY) throw new Error(guidedInstallError());
   terminal.banner(); terminal.paragraph('Connect Git and your coding agents once for this machine. Existing hooks and unrelated agent settings are preserved.');
-  const launch = !initial['no-launch'] && (initial.launch || !initial.yes);
+  // Sphinx opens no client on native Windows: promise nothing up front, and end with the note once instead of a failed launch.
+  const launch = process.platform !== 'win32' && !initial['no-launch'] && (initial.launch || !initial.yes);
   if (launch) terminal.paragraph('After setup, Sphinx opens selected installed clients in fresh sessions. Existing sessions stay open. Use --no-launch to defer this step.');
   // Native Windows detects nothing; the guided choice only keeps a Claude Code integration that is already connected.
   const detected = !initial.yes && (initial.agents === undefined || initial.agents === 'auto') ? await (process.platform === 'win32' ? installedAgents() : detectAgents()) : [];
