@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { prepareInteractiveCheck } from '../src/check-recovery.js';
+import { isCliFailure, prepareInteractiveCheck } from '../src/check-recovery.js';
 import { createSessionStore } from '../src/sessions.js';
 import { DEFAULT_CONFIG } from '../src/config.js';
 import { createPrompts } from '../src/prompts.js';
@@ -284,5 +284,20 @@ test('a coding-agent CLI failure names the CLI and offers the other installed pl
   await f.run(prompt => prompt.choices[0].value, { planProviders: ['claude', 'codex'], switchRoute: provider => f.store.switchRoute(snapshot.id, f.config, provider), start: () => f.store.start(snapshot.id, f.config) });
   assert.equal(f.prompts[0].title, 'Codex could not run this review');
   assert.deepEqual(f.prompts[0].choices.filter(choice => choice.value.startsWith('switch-')).map(choice => choice.value), ['switch-claude'], 'Never offers the CLI that just failed');
+  assert.equal((await f.store.read(snapshot.id)).route.provider, 'claude');
+});
+
+test('a CLI that cannot start counts as a CLI failure, an unreachable API route does not', () => {
+  assert.equal(isCliFailure({ code: 'PROVIDER_START_FAILED' }, { provider: 'claude' }), true);
+  assert.equal(isCliFailure({ code: 'PROVIDER_START_FAILED' }, { provider: 'openrouter' }), false);
+});
+
+test('a coding-agent CLI that cannot start offers the other plan, never a retry', async t => {
+  const cannotStart = Object.assign(new Error('Could not start codex. Check that the CLI is installed and available on PATH.'), { code: 'PROVIDER_START_FAILED' });
+  const f = await fixture(t, { generate: async (attempt, options) => { await options.beforeCall(); if (attempt === 1) throw cannotStart; return { questions: [question] }; } });
+  await f.store.switchRoute(snapshot.id, f.config, 'codex');
+  await f.run(prompt => prompt.choices[0].value, { planProviders: ['claude', 'codex'], switchRoute: provider => f.store.switchRoute(snapshot.id, f.config, provider), start: () => f.store.start(snapshot.id, f.config) });
+  assert.equal(f.prompts[0].title, 'Codex could not run this review');
+  assert.deepEqual(f.prompts[0].choices.map(choice => choice.value), ['switch-claude', 'pause'], 'Starting the same CLI again cannot help');
   assert.equal((await f.store.read(snapshot.id)).route.provider, 'claude');
 });
