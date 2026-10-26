@@ -29,10 +29,14 @@ const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
  * `sphinx` on PATH (an npm/yarn symlink or a pnpm/bun shim): it survives
  * upgrades, unlike a versioned store path. Node's directory is put first on
  * PATH so GUI-launched agents without a login PATH still find node. A checkout
- * without such a shim falls back to absolute node and CLI paths.
+ * without such a shim falls back to absolute node and CLI paths. Native Windows
+ * always does: Git's sh splits a `PATH='C:\...':"$PATH"` prefix at the drive
+ * colon, so it would only work in repositories on drive C:, and Windows files
+ * carry no execute bit to recognise a shim by.
  * Returns shell `env` assignments (placed before any exec) and the `command`.
  */
-export async function sphinxLauncher(cliPath, env = process.env, execPath = process.execPath) {
+export async function sphinxLauncher(cliPath, env = process.env, execPath = process.execPath, platform = process.platform) {
+  if (platform === 'win32') return { env: '', command: `${quote(execPath)} ${quote(cliPath)}` };
   const real = await realpath(cliPath).catch(() => cliPath);
   for (const directory of String(env.PATH || '').split(path.delimiter).filter(dir => path.isAbsolute(dir))) {
     const candidate = path.join(directory, 'sphinx');
@@ -48,6 +52,20 @@ export async function sphinxLauncher(cliPath, env = process.env, execPath = proc
 }
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const AGENTS = ['codex', 'claude', 'pi', 'cursor', 'opencode'];
+export const WINDOWS_AGENT_HINT = 'On Windows, Sphinx installs Git hooks only. Add the optional Claude Code integration with sphinx install --agents claude.';
+
+/**
+ * Native Windows runs the Git hooks and, only when asked for, Claude Code.
+ * `agents` is `auto`, `none`, a comma-separated list, or an array; `auto` and
+ * `none` select nothing there. Call it before anything is saved, credentials
+ * included, so a rejected selection leaves no trace.
+ */
+export function checkAgentPlatform(agents, platform = process.platform) {
+  if (platform !== 'win32') return;
+  const selected = Array.isArray(agents) ? agents : agents === 'auto' || agents === 'none' ? [] : agents.split(',').map(name => name.trim()).filter(Boolean);
+  const names = selected.filter(name => name !== 'claude');
+  if (names.length) throw new Error(`Native Windows supports Git hooks and the optional Claude Code integration (--agents claude). ${names.join(', ')} ${names.length > 1 ? 'are' : 'is'} not supported on native Windows yet; use WSL.`);
+}
 
 function gitEnvironment(env) {
   // An explicit integration home must never write the caller's real global file.
@@ -189,16 +207,18 @@ async function detectedAgents({ paths, env, manifest }) {
     (await executable(name, env) || await exists(integrationHome(name)) || manifest.agents[name]) ? name : null))).filter(Boolean);
 }
 
-export async function detectAgents({ env = process.env } = {}) {
+export async function detectAgents({ env = process.env, platform = process.platform } = {}) {
+  if (platform === 'win32') return [];
   const { paths, manifest } = await manifestFor(env);
   return detectedAgents({ paths, env, manifest });
 }
 
-async function prepareAgents({ agents, paths, env, cliPath, launcher, manifest }) {
+async function prepareAgents({ agents, paths, env, cliPath, launcher, manifest, platform = process.platform }) {
   const selected = agents === 'auto'
-    ? await detectedAgents({ paths, env, manifest })
+    ? platform === 'win32' ? [] : await detectedAgents({ paths, env, manifest })
     : agents === 'none' ? [] : Array.isArray(agents) ? agents : agents.split(',').map(x => x.trim());
   if ((!selected.length && agents !== 'auto' && agents !== 'none') || selected.some(name => !AGENTS.includes(name))) throw new Error('--agents must be auto, none, or a comma-separated list of codex, claude, pi, cursor, opencode.');
+  checkAgentPlatform(selected, platform); // Before any settings file is read: a rejected selection changes nothing.
   const result = [];
   for (const name of new Set(selected)) {
     if (['pi', 'cursor', 'opencode'].includes(name)) {
@@ -234,17 +254,16 @@ export async function installedAgents({ env = process.env } = {}) {
   return AGENTS.filter(name => manifest.agents[name]);
 }
 
-export async function install({ config, agents = 'auto', repo = false, cwd = process.cwd(), env = process.env, cliPath }) {
+export async function install({ config, agents = 'auto', repo = false, cwd = process.cwd(), env = process.env, cliPath, platform = process.platform }) {
   if (!cliPath || !path.isAbsolute(cliPath)) throw new Error('Installation requires an absolute CLI path.');
-  if (process.platform === 'win32') throw new Error('Use Sphinx from WSL; native Windows installation is not supported yet.');
   const { paths, manifest } = await manifestFor(env);
   const messages = [], warnings = [];
   const info = repo ? await repoInfo(cwd, env) : { id: 'global', scope: '--global', root: null };
   const id = info.id;
   const previous = manifest.installs[id];
   // Validate every selected settings file before mutating any integration.
-  const launcher = await sphinxLauncher(cliPath, env);
-  const agentPlans = await prepareAgents({ agents, paths, env, cliPath, launcher, manifest });
+  const launcher = await sphinxLauncher(cliPath, env, process.execPath, platform);
+  const agentPlans = await prepareAgents({ agents, paths, env, cliPath, launcher, manifest, platform });
   const scopeValues = await currentConfig(info.scope, cwd, env);
   if (previous && scopeValues.at(-1) !== previous.hookDir) {
     throw new Error('Git hooks changed since Sphinx was installed. Run sphinx uninstall first; your current configuration will be preserved.');
@@ -308,7 +327,7 @@ export async function install({ config, agents = 'auto', repo = false, cwd = pro
     await writeJson(paths.install, manifest);
     messages.push(`${name === 'codex' ? 'Codex' : 'Claude Code'} native questionnaire hooks and Sphinx MCP server installed.`);
   }
-  if (!agentPlans.length && agents === 'auto') warnings.push('No supported coding agent was detected. Install one, then rerun sphinx install; Git hooks are ready.');
+  if (!agentPlans.length && agents === 'auto') warnings.push(platform === 'win32' ? WINDOWS_AGENT_HINT : 'No supported coding agent was detected. Install one, then rerun sphinx install; Git hooks are ready.');
   if (!repo) {
     try {
       await git(['rev-parse', '--git-dir'], cwd, env);
@@ -418,7 +437,7 @@ export async function dispatchHook({ event, args = [], input = '', cwd = process
   return gate({ event, args, input, cwd });
 }
 
-export async function doctor({ env = process.env, cwd = process.cwd() } = {}) {
+export async function doctor({ env = process.env, cwd = process.cwd(), platform = process.platform } = {}) {
   const { paths, manifest } = await manifestFor(env);
   const checks = [];
   const global = manifest.installs.global;
@@ -442,10 +461,12 @@ export async function doctor({ env = process.env, cwd = process.cwd() } = {}) {
   } catch { checks.push({ name: 'Current repository', ok: true, detail: 'Not inside a Git repository; global installation still applies to other repositories.' }); }
   for (const name of AGENTS) {
     const installed = manifest.agents[name];
+    // An agent that native Windows does not support is not an option to offer there; one already installed is still checked.
+    const notSelected = platform === 'win32' && name !== 'claude' ? 'Not supported on native Windows yet.' : `Not selected. Optional: sphinx install --agents ${name}.`;
     if (['pi', 'cursor', 'opencode'].includes(name)) {
       const result = await (name === 'pi' ? piIntegrationStatus : lifecycleIntegrationStatus)(paths, { record: installed, env });
       checks.push({ name: `${name} integration`, ok: installed ? result.healthy : true, detail: !installed
-        ? `Not selected. Optional: sphinx install --agents ${name}.`
+        ? notSelected
         : !result.healthy ? `Integration is missing or changed. Run sphinx install --agents ${name}.`
           : name === 'pi' ? `${result.file}; native human dialogs configured. Run /reload in Pi; dialog support is required.`
             : `${result.file}; local browser questionnaires configured. macOS opens the page in the background; other environments show its local URL. Human answers stay in the questionnaire; terminal checks are explicit${name === 'cursor' ? '; local sessions only, not cloud agents' : '; OpenCode 1.x plugin'}.` });
@@ -461,7 +482,7 @@ export async function doctor({ env = process.env, cwd = process.cwd() } = {}) {
     checks.push({ name: `${name} integration`, ok: installed ? present : true, detail: present
       ? `${installed.file}; native questionnaire hooks configured${name === 'codex' ? '; review/trust in /hooks is required and cannot be verified by Sphinx' : '; start a new session to load changes'}`
       : installed ? `Native questionnaire hooks are missing, legacy, or changed. Run sphinx install --agents ${name}.`
-        : `Not selected. Optional: sphinx install --agents ${name}.` });
+        : notSelected });
     if (installed) {
       const mcpPresent = await inspectMcp(installed.mcp);
       checks.push({ name: `${name} questionnaire server`, ok: mcpPresent, detail: mcpPresent

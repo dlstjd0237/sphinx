@@ -5,12 +5,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, execFileSync } from 'node:child_process';
-import { install, uninstall, doctor, dispatchHook, detectAgents } from '../src/install.js';
+import { install, uninstall, doctor, dispatchHook, detectAgents, checkAgentPlatform, WINDOWS_AGENT_HINT } from '../src/install.js';
 import { getPaths } from '../src/config.js';
 import { lifecycleHome } from '../src/lifecycle-integrations.js';
 
-async function fixture(t) {
-  const base = await mkdtemp(path.join(tmpdir(), "sphinx install ' "));
+async function fixture(t, { prefix = "sphinx install ' " } = {}) {
+  const base = await mkdtemp(path.join(tmpdir(), prefix));
   t.after(() => rm(base, { recursive: true, force: true }));
   const home = path.join(base, 'home');
   const repo = path.join(base, 'repository');
@@ -39,17 +39,17 @@ test('Cursor, OpenCode and Pi install together, preserve user settings, and unin
   await writeFile(cursorFile, JSON.stringify(existing));
   const jsonc = '// Keep comments\n{"model":"my/model", "plugin":["my-plugin"]}\n';
   await writeFile(openCodeConfig, jsonc);
-  const result = await install({ ...f.options, agents: 'cursor,opencode,pi' });
+  const result = await install({ ...f.options, agents: 'cursor,opencode,pi', platform: 'linux' });
   assert.deepEqual(result.agents, ['cursor', 'opencode', 'pi']);
   assert.deepEqual(result.warnings, []);
   assert.match(result.messages.join('\n'), /Pi extension installed with native/);
-  await install({ ...f.options, agents: 'cursor,opencode,pi' });
+  await install({ ...f.options, agents: 'cursor,opencode,pi', platform: 'linux' });
   const cursor = await json(cursorFile);
   assert.equal(cursor.hooks.sessionStart.length, 2);
   assert.equal(cursor.hooks.postToolUse.length, 1);
   assert.equal(cursor.hooks.postToolUseFailure[0].matcher, '^Shell$');
   assert.equal(await readFile(openCodeConfig, 'utf8'), jsonc);
-  assert.equal((await doctor(f.options)).checks.every(check => check.ok), true);
+  assert.equal((await doctor({ ...f.options, platform: 'linux' })).checks.every(check => check.ok), true);
   const manifest = await json(f.paths.install);
   assert.match(await readFile(manifest.agents.opencode.file, 'utf8'), /registerOpenCodeIntegration/);
   assert.match(await readFile(manifest.agents.pi.file, 'utf8'), /registerPiIntegration/);
@@ -63,10 +63,10 @@ test('Cursor, OpenCode and Pi install together, preserve user settings, and unin
 test('new Cursor settings disappear on uninstall and auto detection finds all supported agent homes', async t => {
   const f = await fixture(t);
   for (const directory of [f.paths.codexHome, f.paths.claudeHome, lifecycleHome('cursor', f.paths, f.env), lifecycleHome('opencode', f.paths, f.env), path.join(f.home, '.pi', 'agent')]) await mkdir(directory, { recursive: true });
-  assert.deepEqual(await detectAgents(f.options), ['codex', 'claude', 'pi', 'cursor', 'opencode']);
+  assert.deepEqual(await detectAgents({ ...f.options, platform: 'linux' }), ['codex', 'claude', 'pi', 'cursor', 'opencode']);
   await assert.rejects(readFile(f.paths.install), { code: 'ENOENT' });
   assert.throws(() => f.git('config', '--global', '--get', 'core.hooksPath'));
-  await install({ ...f.options, agents: 'auto' });
+  await install({ ...f.options, agents: 'auto', platform: 'linux' });
   const manifest = await json(f.paths.install);
   assert.deepEqual(Object.keys(manifest.agents).sort(), ['claude', 'codex', 'cursor', 'opencode', 'pi']);
   await uninstall(f.options);
@@ -328,7 +328,7 @@ test('reinstalling an edited agent hook refuses to create a second Sphinx handle
 test('installer preserves user replacement symlinks and reports intentionally unselected agents as optional', async t => {
   const f = await fixture(t);
   await install(f.options);
-  const report = await doctor(f.options);
+  const report = await doctor({ ...f.options, platform: 'linux' });
   assert.equal(report.checks.every(check => check.ok), true);
   assert.match(report.checks.find(check => check.name === 'codex integration').detail, /Not selected/);
   const hookDir = f.git('config', '--global', '--get', 'core.hooksPath');
@@ -354,7 +354,7 @@ test('native questionnaire hooks register host MCP servers without changing unre
   await mkdir(f.paths.codexHome, { recursive: true });
   await writeFile(tomlFile, beforeToml);
   await writeFile(claudeFile, JSON.stringify(beforeClaude));
-  await install({ ...f.options, agents: 'codex,claude' });
+  await install({ ...f.options, agents: 'codex,claude', platform: 'linux' });
   for (const name of ['codex', 'claude']) {
     const file = path.join(f.paths[`${name}Home`], name === 'codex' ? 'hooks.json' : 'settings.json');
     const document = await json(file);
@@ -375,8 +375,8 @@ test('native questionnaire hooks register host MCP servers without changing unre
   const claude = await json(claudeFile);
   assert.deepEqual(claude.oauthAccount, beforeClaude.oauthAccount);
   assert.deepEqual(claude.mcpServers.sphinx, { type: 'stdio', command: process.execPath, args: [f.cliPath, 'mcp'], env: { SPHINX_HOME: f.paths.home }, timeout: 1800000 });
-  assert.equal((await doctor(f.options)).checks.every(check => check.ok), true);
-  await install({ ...f.options, agents: 'codex,claude' });
+  assert.equal((await doctor({ ...f.options, platform: 'linux' })).checks.every(check => check.ok), true);
+  await install({ ...f.options, agents: 'codex,claude', platform: 'linux' });
   assert.equal((await readFile(tomlFile, 'utf8')).split('[mcp_servers.sphinx]').length, 2);
   assert.equal((await json(path.join(f.paths.claudeHome, 'settings.json'))).hooks.PostToolUseFailure.length, 1);
   await uninstall(f.options);
@@ -587,4 +587,55 @@ test('hooks call the package manager shim on PATH so upgrades keep working; a ch
   assert.equal(pnpm.command, q(path.join(pnpmBin, 'sphinx')));
   const checkout = await sphinxLauncher(cli, { PATH: other }, node);
   assert.deepEqual(checkout, { env: '', command: `${q(node)} ${q(cli)}` });
+  // Git's sh would split a Windows PATH prefix at the drive colon, so Windows never uses a shim or a PATH prefix.
+  assert.deepEqual(await sphinxLauncher(cli, { PATH: npmBin }, node, 'win32'), { env: '', command: `${q(node)} ${q(cli)}` });
+});
+
+test('native Windows installs Git hooks only, rejects unsupported agents before changing anything, and doctor passes', async t => {
+  const f = await fixture(t, { prefix: "sphinx 한글 ' " });
+  // Both agent homes exist, so only the platform keeps `auto` from selecting them.
+  await mkdir(f.paths.codexHome, { recursive: true }); await mkdir(f.paths.claudeHome, { recursive: true });
+  const q = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+  const result = await install({ ...f.options, agents: 'auto', platform: 'win32' });
+  assert.deepEqual(result.agents, []);
+  assert.ok(result.warnings.includes(WINDOWS_AGENT_HINT));
+  assert.equal(result.warnings.some(warning => warning.includes('No supported coding agent was detected')), false);
+  const hookDir = f.git('config', '--global', '--get', 'core.hooksPath');
+  assert.equal(hookDir, path.join(f.paths.home, 'hooks', 'global'));
+  const prePush = await readFile(path.join(hookDir, 'pre-push'), 'utf8');
+  assert.ok(prePush.includes(`exec ${q(process.execPath)} ${q(f.cliPath)} hook git 'pre-push' "$@"`));
+  assert.doesNotMatch(prePush, /PATH=/);
+  const report = await doctor({ env: f.env, cwd: f.repo, platform: 'win32' });
+  assert.deepEqual(report.checks.filter(check => !check.ok), []);
+  for (const name of ['codex', 'pi', 'cursor', 'opencode']) assert.equal(report.checks.find(check => check.name === `${name} integration`).detail, 'Not supported on native Windows yet.');
+  assert.equal(report.checks.find(check => check.name === 'claude integration').detail, 'Not selected. Optional: sphinx install --agents claude.');
+  assert.deepEqual(await detectAgents({ env: f.env, platform: 'win32' }), []);
+
+  const g = await fixture(t);
+  const claudeSettings = path.join(g.paths.claudeHome, 'settings.json');
+  await mkdir(g.paths.codexHome, { recursive: true }); await mkdir(g.paths.claudeHome, { recursive: true });
+  await writeFile(claudeSettings, '{broken');
+  await assert.rejects(install({ ...g.options, agents: 'codex', platform: 'win32' }), /codex is not supported on native Windows yet; use WSL\./);
+  // Claude Code is allowed, but one unsupported name rejects the whole list first, before its unreadable settings are opened.
+  await assert.rejects(install({ ...g.options, agents: 'claude,pi', platform: 'win32' }), /pi is not supported on native Windows yet; use WSL\./);
+  assert.throws(() => g.git('config', '--global', '--get', 'core.hooksPath'), error => error.status === 1);
+  assert.equal(await readFile(claudeSettings, 'utf8'), '{broken');
+  for (const file of [g.paths.install, path.join(g.paths.codexHome, 'hooks.json'), path.join(g.home, '.claude.json')]) await assert.rejects(readFile(file), { code: 'ENOENT' });
+
+  assert.equal(WINDOWS_AGENT_HINT, 'On Windows, Sphinx installs Git hooks only. Add the optional Claude Code integration with sphinx install --agents claude.');
+  for (const agents of ['auto', 'none', 'claude', ['claude']]) assert.doesNotThrow(() => checkAgentPlatform(agents, 'win32'));
+  assert.throws(() => checkAgentPlatform('claude,pi', 'win32'), /pi is not supported/);
+  assert.throws(() => checkAgentPlatform(['codex', 'cursor'], 'win32'), { message: 'Native Windows supports Git hooks and the optional Claude Code integration (--agents claude). codex, cursor are not supported on native Windows yet; use WSL.' });
+  assert.doesNotThrow(() => checkAgentPlatform('codex', 'linux'));
+});
+
+test('Windows reinstall and uninstall restore an earlier backslash core.hooksPath exactly', async t => {
+  const f = await fixture(t);
+  const earlier = 'C:\\old hooks\\dir';
+  f.git('config', '--global', 'core.hooksPath', earlier);
+  await install({ ...f.options, platform: 'win32' });
+  await install({ ...f.options, platform: 'win32' });
+  assert.equal(f.git('config', '--global', '--get', 'core.hooksPath'), path.join(f.paths.home, 'hooks', 'global'));
+  await uninstall(f.options);
+  assert.equal(f.git('config', '--global', '--get', 'core.hooksPath'), earlier);
 });
