@@ -3,6 +3,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { mkdir, open, writeFile, rename, chmod, lstat, unlink } from 'node:fs/promises';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 // openai means any OpenAI chat-completions-compatible endpoint the user saves.
 export const PROVIDERS = Object.freeze(['openrouter', 'codex', 'claude', 'openai', 'auto']);
@@ -61,6 +62,26 @@ export async function readJson(file, fallback) {
   } finally { await handle?.close(); }
 }
 
+const RENAME_BUSY = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+/**
+ * Atomic saves rename a temporary file over the target. Windows refuses that while
+ * any other handle on the target is open, even a reader's: the questionnaire polls
+ * session files as the worker writes them, and antivirus or indexers hold fresh
+ * files. The refusal clears within moments, so on Windows retry it for about two
+ * seconds (waiting 10 ms, then 20 ms, and so on) and then give up with the last
+ * error. Other systems and other errors fail at once.
+ */
+export async function renameWithRetry(from, to, { signal, platform = process.platform, renameImpl = rename, attempts = 20 } = {}) {
+  for (let attempt = 1; ; attempt++) {
+    try { await renameImpl(from, to); return; } catch (error) {
+      if (platform !== 'win32' || !RENAME_BUSY.has(error?.code) || attempt >= attempts) throw error;
+      signal?.throwIfAborted();
+      await sleep(attempt * 10, undefined, { signal });
+    }
+  }
+}
+
 export async function writeJson(file, value, { signal } = {}) {
   signal?.throwIfAborted();
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -68,7 +89,7 @@ export async function writeJson(file, value, { signal } = {}) {
   try {
     await writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: 'wx', signal });
     signal?.throwIfAborted();
-    await rename(tmp, file);
+    await renameWithRetry(tmp, file, { signal });
     await chmod(file, 0o600);
   } finally {
     await unlink(tmp).catch(error => { if (error.code !== 'ENOENT') throw error; });

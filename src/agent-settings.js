@@ -1,7 +1,8 @@
 import path from 'node:path';
 import { settingsTarget } from './user-file.js';
-import { lstat, readFile, mkdir, writeFile, rename, rm, stat } from 'node:fs/promises';
+import { lstat, readFile, mkdir, writeFile, rm, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { renameWithRetry } from './config.js';
 
 const START = '# >>> Sphinx managed MCP server';
 const END = '# <<< Sphinx managed MCP server';
@@ -30,7 +31,7 @@ async function writeText(link, text) {
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   const mode = await stat(file).then(s => s.mode & 0o777).catch(() => 0o600);
   const temporary = `${file}.${randomUUID()}.tmp`;
-  try { await writeFile(temporary, text, { mode, flag: 'wx' }); await rename(temporary, file); }
+  try { await writeFile(temporary, text, { mode, flag: 'wx' }); await renameWithRetry(temporary, file); }
   finally { await rm(temporary, { force: true }); }
 }
 

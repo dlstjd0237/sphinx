@@ -1,11 +1,11 @@
-import { access, chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, readFile, readdir, realpath, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { settingsTarget } from './user-file.js';
 import { constants } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { constants as osConstants } from 'node:os';
-import { getPaths } from './config.js';
+import { getPaths, renameWithRetry } from './config.js';
 import { RUN_HOOK, msys2Quote, withoutAddedCwdBlock } from './windows.js';
 import { nativeHookSpecs, installedHookSpecs, hasHook, addHook, removeHook, prepareMcp, commitMcp, rollbackMcp, removeMcp, inspectMcp } from './agent-settings.js';
 import { lifecycleHome, prepareCursorIntegration, prepareOpenCodeIntegration, removeLifecycleIntegration, lifecycleIntegrationStatus } from './lifecycle-integrations.js';
@@ -118,7 +118,7 @@ async function writeJson(link, value) {
   const temporary = `${file}.${randomUUID()}.tmp`;
   try {
     await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode });
-    await rename(temporary, file);
+    await renameWithRetry(temporary, file);
   } finally {
     await rm(temporary, { force: true });
   }

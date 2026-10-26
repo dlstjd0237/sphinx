@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_CONFIG, getPaths, loadConfig, openRouterKey, policyHash, repositoryConfigInfo, saveConfig, saveOpenRouterKey, stableStringify, validateConfig, writeJson } from '../src/config.js';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { DEFAULT_CONFIG, getPaths, loadConfig, openRouterKey, policyHash, renameWithRetry, repositoryConfigInfo, saveConfig, saveOpenRouterKey, stableStringify, validateConfig, writeJson } from '../src/config.js';
 
 async function fixture(t) {
   const directory = await mkdtemp(join(tmpdir(), 'sphinx-config-test-'));
@@ -250,4 +251,67 @@ test('understanding distance defaults to mixed, accepts high and low, and a repo
   t.after(() => rm(dir, { recursive: true, force: true }));
   await writeFile(join(dir, '.sphinxconfig'), JSON.stringify({ version: 1, distance: 'low' }));
   assert.equal((await loadConfig(dir, { SPHINX_HOME: join(dir, 'home') })).distance, 'low');
+});
+
+// A rename that fails with `code` for its first `failures` calls (Infinity: always), then succeeds.
+function flakyRename(failures, code = 'EPERM') {
+  const stub = async () => {
+    stub.calls += 1;
+    if (stub.calls <= failures) throw Object.assign(new Error(`${code}: rename refused`), { code });
+  };
+  stub.calls = 0;
+  return stub;
+}
+
+test('a rename that Windows refuses while the file is open is retried until it works, on Windows only', async () => {
+  for (const code of ['EPERM', 'EACCES', 'EBUSY']) {
+    const flaky = flakyRename(2, code);
+    await renameWithRetry('from', 'to', { platform: 'win32', renameImpl: flaky });
+    assert.equal(flaky.calls, 3, code);
+  }
+  const posix = flakyRename(2);
+  await assert.rejects(renameWithRetry('from', 'to', { platform: 'linux', renameImpl: posix }), { code: 'EPERM' });
+  assert.equal(posix.calls, 1);
+});
+
+test('an aborted signal stops the rename retries with its AbortError after the first failure', async () => {
+  const refusing = flakyRename(Infinity);
+  await assert.rejects(renameWithRetry('from', 'to', { signal: AbortSignal.abort(), platform: 'win32', renameImpl: refusing }), { name: 'AbortError' });
+  assert.equal(refusing.calls, 1);
+});
+
+test('rename retries give up after their attempts with the last error, and other errors are not retried', async () => {
+  const stuck = flakyRename(Infinity, 'EBUSY');
+  await assert.rejects(renameWithRetry('from', 'to', { platform: 'win32', attempts: 3, renameImpl: stuck }), { code: 'EBUSY' });
+  assert.equal(stuck.calls, 3);
+  const missing = flakyRename(Infinity, 'ENOENT');
+  await assert.rejects(renameWithRetry('from', 'to', { platform: 'win32', renameImpl: missing }), { code: 'ENOENT' });
+  assert.equal(missing.calls, 1);
+});
+
+test('saving a state file waits out a handle that holds it open on Windows', { skip: process.platform !== 'win32' }, async t => {
+  const { directory } = await fixture(t);
+  const target = join(directory, 'state.json');
+  await writeFile(target, '{}\n');
+  // Windows refuses to rename over a file while any handle on it is open, even a reader's.
+  const reader = await open(target, 'r');
+  const release = sleep(300).then(() => reader.close());
+  try { await writeJson(target, { a: 1 }); } finally { await release; }
+  assert.deepEqual(JSON.parse(await readFile(target, 'utf8')), { a: 1 });
+});
+
+test('aborting a save that waits on an open handle stops it with the old file kept and no temporary file left', { skip: process.platform !== 'win32' }, async t => {
+  const { directory } = await fixture(t);
+  const target = join(directory, 'state.json');
+  await writeFile(target, '{}\n');
+  const reader = await open(target, 'r');
+  const controller = new AbortController();
+  try {
+    const saving = assert.rejects(writeJson(target, { a: 1 }, { signal: controller.signal }), { name: 'AbortError' });
+    await sleep(50);
+    controller.abort();
+    await saving;
+  } finally { await reader.close(); }
+  assert.equal(await readFile(target, 'utf8'), '{}\n');
+  assert.deepEqual((await readdir(directory)).filter(name => name.endsWith('.tmp')), []);
 });
