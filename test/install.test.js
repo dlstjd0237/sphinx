@@ -782,6 +782,55 @@ test('hooks call the package manager shim on PATH so upgrades keep working; a ch
   assert.deepEqual(await sphinxLauncher(cli, { PATH: npmBin }, node, 'win32'), { env: '', command: `${q(node)} ${q(cli)}` });
 });
 
+test('macOS hooks append the reviewer CLI directories after the GUI PATH', async t => {
+  const { sphinxLauncher } = await import('../src/install.js');
+  const f = await fixture(t);
+  const q = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+  const node = '/opt/node/bin/node', cli = path.join(f.base, 'sphinx.js');
+  const tools = path.join(f.base, "tools ' bin"), more = path.join(f.base, 'more tools');
+  for (const name of ['claude', 'gh']) await executable(path.join(tools, name), '#!/bin/sh\n');
+  await executable(path.join(more, 'codex'), '#!/bin/sh\n');
+  const on = (...directories) => ({ PATH: directories.join(path.delimiter) });
+  const direct = { env: '', command: `${q(node)} ${q(cli)}` };
+  const appended = (...directories) => ({ ...direct, env: `PATH="$PATH"${directories.map(directory => `:${q(directory)}`).join('')} ` });
+  // Each directory goes after $PATH once, in the order claude, codex, gh, so the GUI client's own git and system tools stay first.
+  const launcher = await sphinxLauncher(cli, on(tools), node, 'darwin');
+  assert.deepEqual(launcher, appended(tools));
+  assert.ok(launcher.env.endsWith(`tools '\\'' bin' `), 'A quote in a directory name is closed, escaped and reopened');
+  assert.deepEqual(await sphinxLauncher(cli, on(more, tools), node, 'darwin'), appended(tools, more));
+  assert.deepEqual(await sphinxLauncher(cli, on(path.join(f.base, 'none')), node, 'darwin'), direct, 'Without a reviewer CLI there is no PATH change');
+  // A relative PATH entry would resolve against whichever repository the hook runs in, so it is never recorded.
+  await executable(path.join(f.base, 'relative', 'claude'), '#!/bin/sh\n');
+  const here = process.cwd();
+  process.chdir(f.base);
+  try { assert.deepEqual(await sphinxLauncher(cli, on('relative', more), node, 'darwin'), appended(more)); } finally { process.chdir(here); }
+  // The same PATH on any other platform gives the output it always did.
+  for (const platform of ['linux', 'win32']) assert.deepEqual(await sphinxLauncher(cli, on(tools, more), node, platform), direct, platform);
+});
+
+// Windows files carry no execute bit, so no shim is recognised there.
+test('macOS hooks put the reviewer CLI directories after the GUI PATH behind a package manager shim', { skip: process.platform === 'win32' }, async t => {
+  const { sphinxLauncher } = await import('../src/install.js');
+  const f = await fixture(t);
+  const q = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+  const node = '/opt/node/bin/node', cli = path.join(f.base, 'store', 'sphinx-understand', 'bin', 'sphinx.js');
+  const npmBin = path.join(f.base, 'npm-bin'), tools = path.join(f.base, "tools ' bin");
+  await executable(cli, '#!/usr/bin/env node\n');
+  await mkdir(npmBin, { recursive: true }); await symlink(cli, path.join(npmBin, 'sphinx'));
+  await executable(path.join(tools, 'claude'), '#!/bin/sh\n');
+  const command = q(path.join(npmBin, 'sphinx')), on = { PATH: [npmBin, tools].join(path.delimiter) };
+  assert.deepEqual(await sphinxLauncher(cli, on, node, 'darwin'), { env: `PATH='/opt/node/bin':"$PATH":${q(tools)} `, command });
+  assert.deepEqual(await sphinxLauncher(cli, on, node, 'linux'), { env: `PATH='/opt/node/bin':"$PATH" `, command });
+});
+
+test('an agent whose CLI is on PATH is still detected, and one that is not is left out', async t => {
+  const f = await fixture(t);
+  const bin = path.join(f.base, 'bin');
+  await executable(path.join(bin, 'codex'), '#!/bin/sh\n');
+  assert.deepEqual(await detectAgents({ env: { ...f.env, PATH: bin }, platform: 'linux' }), ['codex']);
+  assert.deepEqual(await detectAgents({ env: { ...f.env, PATH: path.join(f.base, 'empty') }, platform: 'linux' }), []);
+});
+
 test('native Windows installs Git hooks only, rejects unsupported agents before changing anything, and doctor passes', async t => {
   const f = await fixture(t, { prefix: "sphinx 한글 ' " });
   // Both agent homes exist, so only the platform keeps `auto` from selecting them.

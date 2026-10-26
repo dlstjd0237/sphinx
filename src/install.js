@@ -34,22 +34,30 @@ const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
  * always does: Git's sh splits a `PATH='C:\...':"$PATH"` prefix at the drive
  * colon, so it would only work in repositories on drive C:, and Windows files
  * carry no execute bit to recognise a shim by.
+ * On macOS, a GUI Git client runs hooks with launchd's PATH, which lacks ~/.local/bin, Homebrew and nvm, so the
+ * directories where claude, codex and gh are found now go after $PATH. After it, so they never shadow the client's own
+ * git or system tools; installing a reviewer CLI somewhere else later takes another `sphinx install`.
  * Returns shell `env` assignments (placed before any exec) and the `command`.
  */
 export async function sphinxLauncher(cliPath, env = process.env, execPath = process.execPath, platform = process.platform) {
   if (platform === 'win32') return { env: '', command: `${quote(execPath)} ${quote(cliPath)}` };
+  const directories = String(env.PATH || '').split(path.delimiter).filter(dir => path.isAbsolute(dir));
+  // Looked up on the absolute entries only: a relative one would resolve against whichever repository the hook runs in.
+  const absolute = { PATH: directories.join(path.delimiter) };
+  const found = platform === 'darwin' ? await Promise.all(['claude', 'codex', 'gh'].map(name => executable(name, absolute))) : [];
+  const extra = [...new Set(found.filter(Boolean))].map(directory => `:${quote(directory)}`).join('');
   const real = await realpath(cliPath).catch(() => cliPath);
-  for (const directory of String(env.PATH || '').split(path.delimiter).filter(dir => path.isAbsolute(dir))) {
+  for (const directory of directories) {
     const candidate = path.join(directory, 'sphinx');
     try {
       const info = await stat(candidate);
       if (!info.isFile() || !(info.mode & 0o111)) continue;
       const matches = await realpath(candidate) === real
         || (info.size < 64 * 1024 && (await readFile(candidate, 'utf8')).includes('sphinx-understand/bin/sphinx.js'));
-      if (matches) return { env: `PATH=${quote(path.dirname(execPath))}:"$PATH" `, command: quote(candidate) };
+      if (matches) return { env: `PATH=${quote(path.dirname(execPath))}:"$PATH"${extra} `, command: quote(candidate) };
     } catch { /* Not a usable shim. */ }
   }
-  return { env: '', command: `${quote(execPath)} ${quote(cliPath)}` };
+  return { env: extra ? `PATH="$PATH"${extra} ` : '', command: `${quote(execPath)} ${quote(cliPath)}` };
 }
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const AGENTS = ['codex', 'claude', 'pi', 'cursor', 'opencode'];
@@ -199,12 +207,13 @@ async function hookNames(source, cwd, env) {
   return [...new Set([...HOOKS, ...existing.filter(name => /^[a-z][a-z0-9-]*$/.test(name))])];
 }
 
+// The first PATH directory that holds `name` (as written on PATH), or null.
 async function executable(name, env) {
   for (const directory of (env.PATH || '').split(path.delimiter)) {
     if (!directory) continue;
-    try { await access(path.join(directory, name), constants.X_OK); return true; } catch {}
+    try { await access(path.join(directory, name), constants.X_OK); return directory; } catch {}
   }
-  return false;
+  return null;
 }
 
 async function detectedAgents({ paths, env, manifest }) {
