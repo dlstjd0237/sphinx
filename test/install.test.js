@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { install, uninstall, doctor, dispatchHook, detectAgents, checkAgentPlatform, WINDOWS_AGENT_HINT } from '../src/install.js';
 import { getPaths } from '../src/config.js';
+import { nativeHookSpecs } from '../src/agent-settings.js';
 import { lifecycleHome } from '../src/lifecycle-integrations.js';
 import { RUN_HOOK, msys2Quote } from '../src/windows.js';
 
@@ -911,4 +912,30 @@ test('Windows install with auto keeps refreshing an opted-in Claude Code integra
   const bare = await install({ ...f.options, agents: 'auto', platform: 'win32' });
   assert.deepEqual(bare.agents, []);
   assert.deepEqual(bare.warnings, [WINDOWS_AGENT_HINT]);
+});
+
+test('on native Windows the Claude Code post-tool hooks also match PowerShell tool calls, and uninstall restores the settings exactly', async t => {
+  // Claude Code on Windows runs git through its PowerShell tool as well as its Bash tool. Every other platform and Codex keep `Bash`.
+  const handler = { type: 'command', command: 'sphinx hook agent claude', timeout: 10 };
+  const matchers = (name, platform) => nativeHookSpecs(name, handler, platform).filter(spec => spec.event.startsWith('PostToolUse')).map(spec => `${spec.event} ${spec.group.matcher}`);
+  assert.deepEqual(matchers('claude', 'win32'), ['PostToolUse Bash|PowerShell', 'PostToolUseFailure Bash|PowerShell']);
+  for (const platform of ['linux', 'darwin']) assert.deepEqual(matchers('claude', platform), ['PostToolUse Bash', 'PostToolUseFailure Bash'], platform);
+  assert.deepEqual(matchers('codex', 'win32'), ['PostToolUse Bash']);
+
+  const f = await fixture(t);
+  const settingsFile = path.join(f.paths.claudeHome, 'settings.json');
+  const before = { model: 'my-model', hooks: { PostToolUse: [{ matcher: 'Write', hooks: [{ type: 'command', command: 'my-write-hook' }] }] } };
+  await mkdir(f.paths.claudeHome, { recursive: true });
+  await writeFile(settingsFile, `${JSON.stringify(before, null, 2)}\n`);
+  await install({ ...f.options, agents: 'claude', platform: 'win32' });
+  const installed = await readFile(settingsFile, 'utf8'), settings = JSON.parse(installed);
+  for (const event of ['PostToolUse', 'PostToolUseFailure']) {
+    const ours = settings.hooks[event].filter(group => group.hooks.some(hook => hook.statusMessage === 'Sphinx understanding check'));
+    assert.deepEqual(ours.map(group => group.matcher), ['Bash|PowerShell'], event);
+  }
+  assert.deepEqual(settings.hooks.PostToolUse[0], before.hooks.PostToolUse[0], 'The existing Write hook stays as it was');
+  await install({ ...f.options, agents: 'claude', platform: 'win32' });
+  assert.equal(await readFile(settingsFile, 'utf8'), installed, 'Installing again changes nothing');
+  await uninstall(f.options);
+  assert.deepEqual(await json(settingsFile), before);
 });

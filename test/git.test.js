@@ -1,7 +1,7 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, spawnSync } from 'node:child_process';
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -282,6 +282,18 @@ test('on Windows git ls-remote shares the console of a person at the terminal, s
   };
   assert.equal(await titleAfter(true, 'sphinx-terminal-user'), 'sphinx-terminal-user', 'a person at the terminal must keep the console that ssh asks on');
   assert.equal(await titleAfter(false, 'sphinx-unattended'), original, 'an unattended run still gets a console of its own, which has no window');
+});
+
+// Without a session tag, a questionnaire that Git queued reaches Claude Code's post-tool hook only if both name the same repository root.
+// On Windows the hook's folder and Git's can be spelled differently (drive letter case, slash direction), so every spelling has to give one root.
+test('on Windows a lower-case drive letter and forward slashes name the same repository root', { skip: process.platform !== 'win32' }, async t => {
+  const original = await realpath(await fixture(t));
+  // Only the drive letter in lower case, as in c:/Users/..., and the whole path in lower case, as in c:/users/...
+  for (const spelling of [original.replace(/^[A-Z]/, letter => letter.toLowerCase()), original.toLowerCase()]) {
+    const variant = spelling.replaceAll('\\', '/');
+    assert.match(variant, /^[a-z]:\/[^\\]+$/, 'the spelling differs from the original in the drive letter and the slashes');
+    assert.equal((await repository(variant)).root, (await repository(original)).root, variant);
+  }
 });
 
 test('never runs configured external diff or textconv', async t => {

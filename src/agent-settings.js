@@ -102,15 +102,18 @@ function assertNoCodexConflict(text, file) {
   }
 }
 
-export function nativeHookSpecs(name, sessionHandler) {
+export function nativeHookSpecs(name, sessionHandler, platform = process.platform) {
   // A plain command, not an MCP tool call: it needs no MCP connection, so it works
   // in sessions opened before installation and exits silently when nothing is queued.
   const handler = { type: 'command', command: sessionHandler.command, timeout: 1800, statusMessage: 'Sphinx understanding check' };
+  // Claude Code on Windows runs git through its PowerShell tool as well as its Bash tool.
+  // Every other platform and agent matches Bash only.
+  const matcher = name === 'claude' && platform === 'win32' ? 'Bash|PowerShell' : 'Bash';
   return [
     // Codex uses the handler's statusMessage as its /hooks display name too.
     { event: 'SessionStart', group: { hooks: [{ ...sessionHandler, statusMessage: 'Sphinx session setup' }] } },
-    { event: 'PostToolUse', group: { matcher: 'Bash', hooks: [handler] } },
-    ...(name === 'claude' ? [{ event: 'PostToolUseFailure', group: { matcher: 'Bash', hooks: [handler] } }] : []),
+    { event: 'PostToolUse', group: { matcher, hooks: [handler] } },
+    ...(name === 'claude' ? [{ event: 'PostToolUseFailure', group: { matcher, hooks: [handler] } }] : []),
   ];
 }
 

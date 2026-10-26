@@ -250,7 +250,7 @@ async function prepareAgents({ agents, paths, env, cliPath, launcher, manifest, 
     if (document.hooks !== undefined && (!document.hooks || typeof document.hooks !== 'object' || Array.isArray(document.hooks))) throw new Error(`Invalid hooks object in ${file}`);
     const command = `SPHINX_HOME=${quote(paths.home)} ${launcher.env}${launcher.command} hook agent ${name}`;
     const handler = { type: 'command', command, timeout: 10 };
-    const hooks = nativeHookSpecs(name, handler);
+    const hooks = nativeHookSpecs(name, handler, platform);
     for (const { event } of hooks) {
       if (document.hooks?.[event] !== undefined && (!Array.isArray(document.hooks[event]) || document.hooks[event].some(group => !group || typeof group !== 'object' || !Array.isArray(group.hooks)))) throw new Error(`Invalid ${event} hooks in ${file}`);
     }
