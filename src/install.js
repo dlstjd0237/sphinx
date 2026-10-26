@@ -57,13 +57,15 @@ export const WINDOWS_AGENT_HINT = 'On Windows, Sphinx installs Git hooks only. A
 /**
  * Native Windows runs the Git hooks and, only when asked for, Claude Code.
  * `agents` is `auto`, `none`, a comma-separated list, or an array; `auto` and
- * `none` never name an unsupported agent. Call it before anything is saved,
- * credentials included, so a rejected selection leaves no trace.
+ * `none` never name an unsupported agent. Only known agents are named, once
+ * each; a misspelled name or an empty entry is left to the name validation.
+ * Call it before anything is saved, credentials included, so a rejected
+ * selection leaves no trace.
  */
 export function checkAgentPlatform(agents, platform = process.platform) {
   if (platform !== 'win32') return;
-  const selected = Array.isArray(agents) ? agents : agents === 'auto' || agents === 'none' ? [] : agents.split(',').map(name => name.trim()).filter(Boolean);
-  const names = selected.filter(name => name !== 'claude');
+  const selected = Array.isArray(agents) ? agents : agents === 'auto' || agents === 'none' ? [] : agents.split(',').map(name => name.trim());
+  const names = [...new Set(selected)].filter(name => name !== 'claude' && AGENTS.includes(name));
   if (names.length) throw new Error(`Native Windows supports Git hooks and the optional Claude Code integration (--agents claude). ${names.join(', ')} ${names.length > 1 ? 'are' : 'is'} not supported on native Windows yet; use WSL.`);
 }
 

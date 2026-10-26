@@ -7,8 +7,12 @@ import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
+import { activationAdvice, agentSummary, guidedInstallError } from '../src/cli.js';
+import { getPaths } from '../src/config.js';
 
 const CLI = fileURLToPath(new URL('../bin/sphinx.js', import.meta.url));
+const WINDOWS_NOTE = 'Sphinx does not open clients on Windows. Start a new Claude Code session in this repository to load Sphinx.';
+const squash = text => text.replace(/\s+/g, ' ');
 
 // A subprocess fixture exercising the real provider transport and output validation.
 // It never calls a model or connects to a service.
@@ -344,7 +348,9 @@ test('each public CLI command provides contextual help without setup or model ca
 test('scripted installation defers client launch and activate checks configured selections', async t => {
   const f = await fixture(t);
   const output = f.cli('install', '--yes', '--provider', 'claude', '--agents', 'claude');
-  assert.match(output, /sphinx activate --agents claude/);
+  // Native Windows never opens clients: it says to start a Claude Code session instead of offering a command.
+  if (process.platform === 'win32') { assert.ok(squash(output).includes(WINDOWS_NOTE)); assert.doesNotMatch(output, /sphinx activate/); }
+  else assert.match(output, /sphinx activate --agents claude/);
   assert.doesNotMatch(output, /Restart Claude Code|Codex hook trust/);
   await assert.rejects(stat(path.join(f.env.SPHINX_HOME, 'activations')), { code: 'ENOENT' });
   const manifest = await readFile(path.join(f.env.SPHINX_HOME, 'install.json'), 'utf8');
@@ -362,7 +368,8 @@ test('explicit activation in headless environments reports fallback without chan
   const env = { ...f.env, CI: '1', FORCE_COLOR: '1' };
   const installed = f.run(process.execPath, [CLI, 'install', '--yes', '--launch', '--provider', 'claude', '--agents', 'claude'], { env });
   assert.equal(installed.status, 0, installed.stderr);
-  assert.match(installed.stdout, /No local desktop/);
+  const fallback = process.platform === 'win32' ? WINDOWS_NOTE : 'No local desktop';
+  assert.ok(squash(installed.stdout).includes(fallback));
   const manifest = await readFile(path.join(f.env.SPHINX_HOME, 'install.json'), 'utf8');
   const activated = f.run(process.execPath, [CLI, 'activate', '--json'], { env });
   assert.equal(activated.status, 1);
@@ -370,10 +377,55 @@ test('explicit activation in headless environments reports fallback without chan
   const { results } = JSON.parse(activated.stdout);
   assert.deepEqual(results.map(item => item.agent), ['claude']);
   assert.equal(results[0].status, 'unavailable');
-  assert.match(results[0].detail, /No local desktop/);
+  assert.ok(results[0].detail.includes(fallback));
   assert.equal(await readFile(path.join(f.env.SPHINX_HOME, 'install.json'), 'utf8'), manifest);
   await assert.rejects(stat(path.join(f.env.SPHINX_HOME, 'activations')), { code: 'ENOENT' });
   assert.deepEqual(await f.calls(), []);
+});
+
+test('the guided-install error points Git Bash users at a real terminal, only on Windows', () => {
+  const guided = 'Run sphinx install in a terminal for guided setup, or use --yes with your chosen options. See sphinx install --help.';
+  assert.equal(guidedInstallError('linux', { MSYSTEM: 'MINGW64' }), guided);
+  assert.equal(guidedInstallError('win32', {}), guided);
+  assert.equal(guidedInstallError('win32', { MSYSTEM: 'MINGW64' }), `${guided} Git Bash's MinTTY window does not give Node a terminal; run sphinx install from Windows Terminal or PowerShell, or use --yes.`);
+});
+
+test('the agent summary row and the activation advice say what native Windows does', () => {
+  const windows = 'auto (Git hooks; keeps Claude Code if already connected)';
+  assert.equal(agentSummary(undefined, 'win32'), windows);
+  assert.equal(agentSummary('auto', 'win32'), windows);
+  assert.equal(agentSummary(undefined, 'linux'), 'auto (detect installed agents)');
+  for (const platform of ['win32', 'linux']) for (const agents of ['claude', 'none', 'claude,pi']) assert.equal(agentSummary(agents, platform), agents);
+  assert.deepEqual(activationAdvice(['claude'], 'win32'), { note: WINDOWS_NOTE });
+  assert.deepEqual(activationAdvice(['claude'], 'linux'), { command: 'sphinx activate --agents claude' });
+  assert.deepEqual(activationAdvice(['codex', 'claude'], 'darwin'), { command: 'sphinx activate --agents codex,claude' });
+});
+
+test('on Windows an unsupported agent is rejected before any OpenRouter key is saved', { skip: process.platform !== 'win32' }, async t => {
+  const f = await fixture(t);
+  // No key is set: without the early check this stops on the missing key instead, and guided setup would ask for one first.
+  const result = f.run(process.execPath, [CLI, 'install', '--yes', '--preset', 'openrouter-value', '--allow-paid', '--agents', 'codex']);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /codex is not supported on native Windows yet/);
+  await assert.rejects(stat(getPaths(f.env).credentials), { code: 'ENOENT' });
+  await assert.rejects(stat(getPaths(f.env).install), { code: 'ENOENT' });
+});
+
+test('on Windows, guided setup offers only Claude Code and preselects it once it is connected', { skip: process.platform !== 'win32' }, async t => {
+  const f = await fixture(t);
+  // The preload makes the piped stdin look like a terminal. With every other choice given, one Enter answers the only question.
+  const looksLikeTerminal = "data:text/javascript,Object.defineProperty(process.stdin,'isTTY',{value:true})";
+  const guided = () => f.run(process.execPath, ['--import', looksLikeTerminal, CLI, 'install', '--no-launch', '--preset', 'claude-economy', '--events', 'pre-push', '--branches', 'main', '--remotes', '*', '--level', 'standard', '--distance', 'high'], { input: '\n' });
+  const fresh = guided();
+  assert.equal(fresh.status, 0, fresh.stderr);
+  assert.match(fresh.stdout, /2\. \[ \] Claude Code/);
+  assert.doesNotMatch(fresh.stdout, /\[.\] (?:Codex|Pi|Cursor|OpenCode)/);
+  assert.match(fresh.stdout, /Agent integrations +none/);
+  f.cli('install', '--yes', '--agents', 'claude');
+  const connected = guided();
+  assert.equal(connected.status, 0, connected.stderr);
+  assert.match(connected.stdout, /2\. \[x\] Claude Code/);
+  assert.match(connected.stdout, /Agent integrations +claude/);
 });
 
 test('contradictory launch flags and repository-only launches fail before installation', async t => {

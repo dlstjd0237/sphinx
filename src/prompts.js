@@ -99,16 +99,19 @@ export async function askPolicy(config, initial, prompts, { scope = 'repository'
   return values;
 }
 
-export async function askInstall(config, initial, prompts, { detectedAgents = [], hasExistingConfig = true, installedPlans = [] } = {}) {
+export async function askInstall(config, initial, prompts, { detectedAgents = [], hasExistingConfig = true, installedPlans = [], platform = process.platform } = {}) {
   let values = { ...initial };
   if (values.agents === undefined) {
-    const selected = await prompts.multiselect({ title: 'Which coding agents do you use?', description: 'Connect any combination. Detected agents are preselected; clear all for Git-only use. Previously connected agents remain installed.', current: detectedAgents, choices: [
+    const agents = [
       { value: 'codex', label: 'Codex', description: 'Local browser page; native fallback forms. Trust Sphinx hooks in /hooks.' },
       { value: 'claude', label: 'Claude Code', description: 'Local browser page; native fallback forms.' },
       { value: 'pi', label: 'Pi', description: 'Local browser page; native fallback dialogs.' },
       { value: 'cursor', label: 'Cursor', description: 'A local browser page for answers from local Agent sessions.' },
       { value: 'opencode', label: 'OpenCode', description: 'A local browser page for answers. Requires OpenCode 1.x.' },
-    ] });
+    ];
+    // Native Windows connects Claude Code only. cli.js passes the agents already connected there, not detected ones.
+    const choices = platform === 'win32' ? agents.filter(agent => agent.value === 'claude') : agents;
+    const selected = await prompts.multiselect({ title: 'Which coding agents do you use?', description: 'Connect any combination. Detected agents are preselected; clear all for Git-only use. Previously connected agents remain installed.', current: detectedAgents.filter(name => choices.some(choice => choice.value === name)), choices });
     values.agents = selected.length ? selected.join(',') : 'none';
   }
   const tiers = ['small', 'medium', 'large'];

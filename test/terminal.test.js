@@ -152,13 +152,29 @@ test('agent checkboxes accept arbitrary combinations, preselect detection, and s
     assert.deepEqual(options.choices.map(choice => choice.value), ['codex', 'claude', 'pi', 'cursor', 'opencode']);
     return ['pi', 'cursor', 'opencode'];
   } });
-  const result = await askInstall(DEFAULT_CONFIG, initial, prompts, { detectedAgents: ['claude', 'pi'] });
+  const result = await askInstall(DEFAULT_CONFIG, initial, prompts, { detectedAgents: ['claude', 'pi'], platform: 'linux' });
   assert.equal(result.agents, 'pi,cursor,opencode');
   assert.doesNotThrow(() => applyInstallOptions(DEFAULT_CONFIG, result));
-  for (const agents of ['auto', 'none', 'codex,pi']) assert.equal((await askInstall(DEFAULT_CONFIG, { ...initial, agents }, prompts)).agents, agents);
+  for (const agents of ['auto', 'none', 'codex,pi']) assert.equal((await askInstall(DEFAULT_CONFIG, { ...initial, agents }, prompts, { platform: 'linux' })).agents, agents);
   assert.equal(selections, 1);
-  const cleared = await askInstall(DEFAULT_CONFIG, initial, { multiselect: async () => [] });
+  const cleared = await askInstall(DEFAULT_CONFIG, initial, { multiselect: async () => [] }, { platform: 'linux' });
   assert.equal(cleared.agents, 'none');
+});
+
+test('on Windows, guided setup offers only Claude Code, preselected only when already connected', async () => {
+  const initial = { provider: 'claude', events: 'pre-push', branches: 'main', remotes: '*', level: 'standard', distance: 'high', mode: 'block' };
+  const current = [];
+  let chosen = [];
+  const prompts = createPrompts({ ui: capture().ui, ask: () => assert.fail('other choices were supplied'), select: async options => {
+    assert.deepEqual(options.choices.map(choice => choice.value), ['claude']);
+    current.push(options.current);
+    return chosen;
+  } });
+  // Another connected agent never preselects Claude Code, and clearing the box leaves Git hooks only.
+  assert.equal((await askInstall(DEFAULT_CONFIG, initial, prompts, { detectedAgents: ['codex'], platform: 'win32' })).agents, 'none');
+  chosen = ['claude'];
+  assert.equal((await askInstall(DEFAULT_CONFIG, initial, prompts, { detectedAgents: ['claude', 'codex'], platform: 'win32' })).agents, 'claude');
+  assert.deepEqual(current, [[], ['claude']]);
 });
 
 test('checkbox line fallback toggles any agents and all without accepting partially invalid input', async () => {

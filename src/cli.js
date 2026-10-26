@@ -12,8 +12,8 @@ import { DISTANCES, getPaths, loadConfig, saveConfig, saveOpenRouterKey, openRou
 import { initializeRepository } from './repo-config.js';
 import { applyRepositorySetup, suggestRepositorySetup } from './repo-setup.js';
 import * as git from './git.js';
-import { install, uninstall, doctor, dispatchHook, installedAgents, detectAgents } from './install.js';
-import { activateIntegrations } from './activation.js';
+import { install, uninstall, doctor, dispatchHook, installedAgents, detectAgents, checkAgentPlatform } from './install.js';
+import { activateIntegrations, WINDOWS_ACTIVATION_NOTE } from './activation.js';
 import { checkbox } from './checkbox.js';
 import { agentHook } from './agent.js';
 import { createSessionStore } from './sessions.js';
@@ -188,6 +188,23 @@ function printInstallationResult(terminal, result) {
   for (const line of result.warnings) terminal.warning(line);
 }
 
+// Git Bash's MinTTY window is expected to hand Node a pipe instead of a terminal (to be confirmed in the Windows E2E), so say where guided setup can run.
+export function guidedInstallError(platform = process.platform, env = process.env) {
+  const message = 'Run sphinx install in a terminal for guided setup, or use --yes with your chosen options. See sphinx install --help.';
+  return platform === 'win32' && env.MSYSTEM ? `${message} Git Bash's MinTTY window does not give Node a terminal; run sphinx install from Windows Terminal or PowerShell, or use --yes.` : message;
+}
+
+// What `--agents` does when it is not given. Native Windows detects nothing: auto only keeps a Claude Code integration that is already connected.
+export function agentSummary(agents, platform = process.platform) {
+  if (platform === 'win32' && (!agents || agents === 'auto')) return 'auto (Git hooks; keeps Claude Code if already connected)';
+  return agents || 'auto (detect installed agents)';
+}
+
+// What to tell the user once clients were not opened: a command to run, or a note on native Windows, where Sphinx never opens clients.
+export function activationAdvice(agents, platform = process.platform) {
+  return platform === 'win32' ? { note: WINDOWS_ACTIVATION_NOTE } : { command: `sphinx activate --agents ${agents.join(',')}` };
+}
+
 function printActivationResult(terminal, result) {
   terminal.section('Open your coding agents');
   if (!result.results.length) { terminal.note('No coding-agent integrations are configured. Choose agents with sphinx install.'); return; }
@@ -196,7 +213,10 @@ function printActivationResult(terminal, result) {
   terminal.blank();
   terminal.note('Opened means a client was launched; hook trust and MCP connections are confirmed inside the client.');
   const remaining = result.results.filter(item => item.status !== 'opened').map(item => item.agent);
-  if (remaining.length) terminal.command(`sphinx activate --agents ${remaining.join(',')}`);
+  if (remaining.length) {
+    const advice = activationAdvice(remaining);
+    if (advice.command) terminal.command(advice.command); else terminal.note(advice.note);
+  }
 }
 
 async function activateCommand(values) {
@@ -265,11 +285,12 @@ async function installCommand(initial) {
   if (initial.yes && !hasExistingConfig && !completeRouteChoice) {
     throw new Error('First installation needs an explicit reviewer choice for every change size. Run sphinx install for guided setup, or use --yes --preset codex-economy, --preset claude-economy, or --preset openrouter-value --allow-paid. Custom routes need all three flags: --small, --medium, and --large.');
   }
-  if (!initial.yes && !process.stdin.isTTY) throw new Error('Run sphinx install in a terminal for guided setup, or use --yes with your chosen options. See sphinx install --help.');
+  if (!initial.yes && !process.stdin.isTTY) throw new Error(guidedInstallError());
   terminal.banner(); terminal.paragraph('Connect Git and your coding agents once for this machine. Existing hooks and unrelated agent settings are preserved.');
   const launch = !initial['no-launch'] && (initial.launch || !initial.yes);
   if (launch) terminal.paragraph('After setup, Sphinx opens selected installed clients in fresh sessions. Existing sessions stay open. Use --no-launch to defer this step.');
-  const detected = !initial.yes && (initial.agents === undefined || initial.agents === 'auto') ? await detectAgents() : [];
+  // Native Windows detects nothing; the guided choice only keeps a Claude Code integration that is already connected.
+  const detected = !initial.yes && (initial.agents === undefined || initial.agents === 'auto') ? await (process.platform === 'win32' ? installedAgents() : detectAgents()) : [];
   const installedPlans = initial.yes ? [] : await planProviders().catch(() => []);
   const values = initial.yes ? initial : await withReadline(ask => askInstall(current, initial, createPrompts({ ask, ui: terminal,
     select: process.stdin.isTTY && process.stdout.isTTY && process.env.TERM !== 'dumb' ? ask.checkbox : undefined,
@@ -278,7 +299,8 @@ async function installCommand(initial) {
   terminal.section('Machine-wide defaults');
   terminal.paragraph('Each repository can override these branches and remotes in .sphinxconfig to match its own production setup.');
   printConfiguration(terminal, config);
-  terminal.rows([['Agent integrations', values.agents || 'auto (detect installed agents)']]);
+  terminal.rows([['Agent integrations', agentSummary(values.agents)]]);
+  checkAgentPlatform(values.agents || 'auto'); // Before auth() can save a key for an install that will be refused.
   if (Object.values(config.models).some(route => route.provider === 'openrouter') && !(await openRouterKey())) {
     if (process.stdin.isTTY && !values.yes) await auth();
     else throw new Error('OpenRouter requires a key before installation. Set OPENROUTER_API_KEY or run sphinx auth. Alternatively choose --provider codex or --provider claude.');
@@ -291,8 +313,8 @@ async function installCommand(initial) {
     if (launch) printActivationResult(terminal, await withProgress('Opening your coding agents', () => activateIntegrations({ agents: result.agents })));
     else {
       terminal.section('Open your coding agents');
-      terminal.command(`sphinx activate --agents ${result.agents.join(',')}`);
-      terminal.note('Opens fresh clients to load Sphinx.');
+      const advice = activationAdvice(result.agents);
+      if (advice.command) { terminal.command(advice.command); terminal.note('Opens fresh clients to load Sphinx.'); } else terminal.note(advice.note);
       if (result.agents.includes('codex')) terminal.note('Codex hook trust still requires your approval in /hooks.');
     }
   }

@@ -629,6 +629,17 @@ test('native Windows installs Git hooks only, rejects unsupported agents before 
   assert.doesNotThrow(() => checkAgentPlatform('codex', 'linux'));
 });
 
+test('the Windows agent check names each unsupported agent once and leaves unknown names to the existing validation', async t => {
+  // Unknown names and empty entries are not "unsupported on Windows": prepareAgents reports them.
+  for (const agents of ['codx', 'claude,', ',', 'Codex', 'claude,codx', ['claude', 'codx']]) assert.doesNotThrow(() => checkAgentPlatform(agents, 'win32'), JSON.stringify(agents));
+  const message = names => `Native Windows supports Git hooks and the optional Claude Code integration (--agents claude). ${names} not supported on native Windows yet; use WSL.`;
+  assert.throws(() => checkAgentPlatform('codex,codex', 'win32'), { message: message('codex is') });
+  assert.throws(() => checkAgentPlatform('pi,codx,claude,codex,pi,,cursor', 'win32'), { message: message('pi, codex, cursor are') });
+  const f = await fixture(t);
+  for (const agents of ['codx', 'claude,']) await assert.rejects(install({ ...f.options, agents, platform: 'win32' }), /--agents must be auto, none, or a comma-separated list/);
+  assert.throws(() => f.git('config', '--global', '--get', 'core.hooksPath'), error => error.status === 1);
+});
+
 test('Windows reinstall and uninstall restore an earlier backslash core.hooksPath exactly', async t => {
   const f = await fixture(t);
   const earlier = 'C:\\old hooks\\dir';

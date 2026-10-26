@@ -13,6 +13,7 @@ const AGENTS = ['codex', 'claude', 'pi', 'cursor', 'opencode'];
 const TOKEN = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const SESSION_ENV = ['CODEX_THREAD_ID', 'CLAUDECODE', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT', 'PI_SESSION_ID', 'SPHINX_CLAUDE_SESSION', 'SPHINX_CURSOR_SESSION', 'SPHINX_OPENCODE_SESSION'];
 const LABELS = { codex: 'Codex', claude: 'Claude Code', pi: 'Pi', cursor: 'Cursor', opencode: 'OpenCode' };
+export const WINDOWS_ACTIVATION_NOTE = 'Sphinx does not open clients on Windows. Start a new Claude Code session in this repository to load Sphinx.';
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
 const desktop = (env, platform) => !env.SSH_CONNECTION && !env.SSH_TTY && !(env.CI && env.CI !== 'false' && env.CI !== '0') && (platform === 'darwin' || (platform === 'linux' && !!(env.DISPLAY || env.WAYLAND_DISPLAY)));
 const freshEnvironment = env => Object.fromEntries(Object.entries(env).filter(([key]) => !SESSION_ENV.includes(key)));
@@ -85,6 +86,7 @@ export async function activateIntegrations({ agents = [], cwd = process.cwd(), e
   const results = await Promise.all([...new Set(agents)].map(async agent => {
     const command = agent === 'cursor' ? `cursor --new-window ${quote(cwd)}` : agent;
     const result = (status, detail) => ({ agent, status, detail, command, cwd });
+    if (platform === 'win32') return result('unavailable', WINDOWS_ACTIVATION_NOTE);
     if (env.SPHINX_EVALUATOR === '1') return result('unavailable', 'Client activation is disabled inside an evaluator.');
     if (!desktop(env, platform)) return result('unavailable', `No local desktop is available. Open a terminal in this repository and run ${command}.`);
     let binary;
