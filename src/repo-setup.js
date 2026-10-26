@@ -21,7 +21,7 @@ const INFORMATIONAL_KEYS = ['version', 'detected', 'nextStep'];
 
 const run = promisify(execFile);
 async function git(cwd, args, maxBuffer = 1024 * 1024) {
-  try { return (await run('git', args, { cwd, encoding: 'utf8', maxBuffer, timeout: 10000 })).stdout; }
+  try { return (await run('git', args, { cwd, encoding: 'utf8', maxBuffer, timeout: 10000, windowsHide: true })).stdout; }
   catch { return null; }
 }
 

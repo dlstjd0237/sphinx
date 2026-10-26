@@ -494,7 +494,7 @@ async function statusCommand(command, values) {
   const info = await repositoryConfigInfo(repo.root), report = await doctor();
   const coverage = report.checks.filter(check => check.name === 'Current repository' || check.name.endsWith('dispatcher'));
   const active = coverage.length > 0 && coverage.every(check => check.ok);
-  const branch = await promisify(execFile)('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd: repo.root }).then(result => result.stdout.trim()).catch(() => 'detached HEAD');
+  const branch = await promisify(execFile)('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd: repo.root, windowsHide: true }).then(result => result.stdout.trim()).catch(() => 'detached HEAD');
   terminal.section('Repository status');
   terminal.rows([['Repository', repo.root], ['Current local branch', branch], ['Git integration', active ? 'Active · Sphinx dispatchers are configured' : 'Not active or needs repair · run sphinx doctor'], ['Repository policy', info.exists ? `${info.path}${info.legacy ? ' (legacy)' : ''}` : 'Global defaults; use sphinx init to create .sphinxconfig']]);
   if (info.shadowed) terminal.warning(`${info.shadowed} is ignored because .sphinxconfig takes precedence.`);

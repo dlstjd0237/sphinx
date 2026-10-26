@@ -80,7 +80,7 @@ function gitEnvironment(env) {
 
 async function git(args, cwd, env, accepted = [0]) {
   return new Promise((resolve, reject) => {
-    const child = spawn('git', args, { cwd, env: gitEnvironment(env), stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('git', args, { cwd, env: gitEnvironment(env), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let stdout = '', stderr = '';
     child.stdout.on('data', data => { stdout += data; });
     child.stderr.on('data', data => { stderr += data; });

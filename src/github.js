@@ -136,7 +136,7 @@ export async function pullRequestPush(snapshot) {
   if (snapshot?.event !== 'pre-push' || !githubRepository(snapshot.target?.url)) return false;
   const branch = String(snapshot.target.ref || '').replace(/^refs\/heads\//, '');
   const remote = snapshot.target.remote;
-  const named = /^[\w.-]+$/.test(remote || '') ? await new Promise(resolve => execFile('git', ['symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`], { cwd: snapshot.repoRoot }, (error, stdout) => resolve(error ? '' : stdout.trim()))) : '';
+  const named = /^[\w.-]+$/.test(remote || '') ? await new Promise(resolve => execFile('git', ['symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`], { cwd: snapshot.repoRoot, windowsHide: true }, (error, stdout) => resolve(error ? '' : stdout.trim()))) : '';
   const fallback = named ? named.slice(remote.length + 1) : null;
   return fallback ? branch !== fallback : !['main', 'master'].includes(branch);
 }
@@ -191,7 +191,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 export function ghCli(args, { env = process.env, host, input, timeoutMs = 30000 } = {}) {
   return new Promise(resolve => {
     let child, stdout = '';
-    try { child = spawn('gh', args, { env: { ...env, GH_HOST: host, GH_PROMPT_DISABLED: '1', NO_COLOR: '1' }, stdio: ['pipe', 'pipe', 'ignore'] }); }
+    try { child = spawn('gh', args, { env: { ...env, GH_HOST: host, GH_PROMPT_DISABLED: '1', NO_COLOR: '1' }, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true }); }
     catch { resolve({ ok: false, stdout: '' }); return; }
     const timer = setTimeout(() => child.kill(), timeoutMs);
     child.stdout.on('data', chunk => { if (stdout.length < 4 * 1024 * 1024) stdout += chunk; });

@@ -17,7 +17,7 @@ async function git(cwd, args, { allowFailure = false, maxBuffer = 4 * 1024 * 102
     const running = exec('git', [
       '--no-pager', '--literal-pathspecs', '-c', 'core.fsmonitor=false', ...args,
     ], {
-      cwd, encoding: 'utf8', maxBuffer, timeout,
+      cwd, encoding: 'utf8', maxBuffer, timeout, windowsHide: true,
       env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_NO_REPLACE_OBJECTS: '1', GIT_TERMINAL_PROMPT: '0' },
     });
     running.child.stdin.on('error', () => {});

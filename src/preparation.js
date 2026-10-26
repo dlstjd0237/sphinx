@@ -33,7 +33,7 @@ async function git(cwd, args, env, optional = false) {
   try {
     const result = await exec('git', ['--no-pager', '-c', 'core.fsmonitor=false', ...args], {
       cwd, env: { ...env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1' },
-      encoding: 'utf8', timeout: 10000, maxBuffer: 256 * 1024,
+      encoding: 'utf8', timeout: 10000, maxBuffer: 256 * 1024, windowsHide: true,
     });
     return result.stdout.trimEnd();
   } catch (error) {
