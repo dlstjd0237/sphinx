@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { promisify } from 'node:util';
@@ -11,14 +11,13 @@ const exec = promisify(execFile);
 const OID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const ZERO = /^0+$/;
 const hash = value => createHash('sha256').update(value).digest('hex');
+const GIT_FLAGS = ['--no-pager', '--literal-pathspecs', '-c', 'core.fsmonitor=false'];
+const gitEnvironment = () => ({ ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_NO_REPLACE_OBJECTS: '1', GIT_TERMINAL_PROMPT: '0' });
 
 async function git(cwd, args, { allowFailure = false, maxBuffer = 4 * 1024 * 1024, timeout = 30000, input } = {}) {
   try {
-    const running = exec('git', [
-      '--no-pager', '--literal-pathspecs', '-c', 'core.fsmonitor=false', ...args,
-    ], {
-      cwd, encoding: 'utf8', maxBuffer, timeout, windowsHide: true,
-      env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_NO_REPLACE_OBJECTS: '1', GIT_TERMINAL_PROMPT: '0' },
+    const running = exec('git', [...GIT_FLAGS, ...args], {
+      cwd, encoding: 'utf8', maxBuffer, timeout, windowsHide: true, env: gitEnvironment(),
     });
     running.child.stdin.on('error', () => {});
     running.child.stdin.end(input);
@@ -31,6 +30,33 @@ async function git(cwd, args, { allowFailure = false, maxBuffer = 4 * 1024 * 102
     if (allowFailure && typeof error.code === 'number') return null;
     throw new Error(`Git ${args[0]} failed: ${(error.stderr || error.message).trim()}`);
   }
+}
+
+/**
+ * git for a command that may have to ask the person at the terminal something, as ssh asks for a passphrase or an unknown host
+ * key. With windowsHide and every stdio piped, libuv starts a Windows child in a console of its own that has no window, so the
+ * question would wait there unseen until the timeout. A child that shares our stdin keeps our console, and windowsHide stays on
+ * as for every git child. Call it only when stdin is a terminal, which means there is a console to share.
+ */
+export function gitSharingConsole(cwd, args, timeout = 30000) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', [...GIT_FLAGS, ...args], {
+      cwd, env: gitEnvironment(), stdio: ['inherit', 'pipe', 'pipe'], windowsHide: true,
+    });
+    let stdout = '', stderr = '', timedOut = false;
+    child.stdout.setEncoding('utf8').on('data', data => { stdout += data; });
+    child.stderr.setEncoding('utf8').on('data', data => { stderr += data; });
+    // Like execFile's timeout, not spawn's: a process git started (ssh) can keep the pipes open after git is killed, so drop them too.
+    // ponytail: only git is killed, as with execFile; an ssh still asking then stays on the console until it is answered. End the whole tree (taskkill /t) if that bites.
+    const timer = setTimeout(() => { timedOut = true; child.stdout.destroy(); child.stderr.destroy(); child.kill(); }, timeout);
+    const finish = (reason, value) => {
+      clearTimeout(timer);
+      if (reason === undefined) resolve(value); else reject(new Error(`Git ${args[0]} failed: ${reason}`));
+    };
+    child.on('error', error => finish(error.message));
+    child.on('close', code => code === 0 ? finish(undefined, stdout)
+      : finish(timedOut ? `it did not finish within ${timeout / 1000} seconds` : stderr.trim() || `exit status ${code}`));
+  });
 }
 
 /** Git wildmatch-like globs: branch '*' spans slashes; path '*' does not. */
@@ -270,7 +296,7 @@ export async function commitSnapshot({ cwd = process.cwd(), config, env = proces
 }
 
 export async function manualSnapshot(options) {
-  const { cwd = process.cwd(), config, branch, env = process.env } = options;
+  const { cwd = process.cwd(), config, branch, env = process.env, platform = process.platform, isTTY } = options;
   const repo = await repository(cwd);
   const localRef = (await git(repo.root, ['symbolic-ref', '--quiet', 'HEAD'], { allowFailure: true }))?.trim();
   const upstream = localRef
@@ -286,7 +312,9 @@ export async function manualSnapshot(options) {
   const remoteUrl = remote === '.' ? '.' : (await git(repo.root, ['remote', 'get-url', '--push', '--all', remote])).trim();
   if (remoteUrl.includes('\n')) throw new Error('Multiple push URLs are not supported for a manual check; use the pending push checkpoint.');
   const head = (await git(repo.root, ['rev-parse', '--verify', 'HEAD'])).trim();
-  const listing = await git(repo.root, ['ls-remote', '--refs', '--', remoteUrl, ref]);
+  // What ssh asks has to reach a person at a Windows terminal (see gitSharingConsole).
+  const share = platform === 'win32' && (isTTY ?? process.stdin.isTTY);
+  const listing = await (share ? gitSharingConsole : git)(repo.root, ['ls-remote', '--refs', '--', remoteUrl, ref]);
   const entry = listing.split('\n').map(line => line.split('\t')).find(parts => parts[1] === ref);
   const old = entry?.[0] || '0'.repeat(head.length);
   const snapshots = await pushSnapshots({ cwd: repo.root, remote, remoteUrl, input: `${localRef || 'HEAD'} ${head} ${ref} ${old}\n`, config, env });

@@ -18,7 +18,9 @@ function callText(source, open) {
 
 // A detached background worker has no console on Windows, so every console program it starts, git and gh included, opens a
 // console window of its own: a burst of flashing windows after each commit in a GUI client. The helpers are shared with the hook
-// process, which has a console, so every call gets the option; there it changes nothing.
+// process, which has a console, so every call gets the option. No window shows there either, but a child whose stdio is all pipes
+// moves to a console of its own: harmless for local commands, which ask nothing. git ls-remote can ask (ssh), so for a person at a
+// terminal it shares their console instead (gitSharingConsole in src/git.js, which still passes the option).
 test('every git and gh child process is started with windowsHide', () => {
   let found = 0;
   const missing = [];
@@ -29,8 +31,8 @@ test('every git and gh child process is started with windowsHide', () => {
       if (!/windowsHide:\s*true/.test(callText(source, index))) missing.push(`src/${name}:${source.slice(0, index).split('\n').length}`);
     }
   }
-  // The scan must not pass by finding nothing. It finds 12 calls today.
-  assert.ok(found >= 12, `the scan found only ${found} git and gh calls in src/*.js`);
+  // The scan must not pass by finding nothing. It finds 13 calls today.
+  assert.ok(found >= 13, `the scan found only ${found} git and gh calls in src/*.js`);
   assert.deepEqual(missing, [], `windowsHide: true is missing from the options of:\n  ${missing.join('\n  ')}`);
 });
 
