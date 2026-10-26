@@ -639,3 +639,25 @@ test('Windows reinstall and uninstall restore an earlier backslash core.hooksPat
   await uninstall(f.options);
   assert.equal(f.git('config', '--global', '--get', 'core.hooksPath'), earlier);
 });
+
+test('Windows install with auto keeps refreshing an opted-in Claude Code integration and shows the hint only when none is installed', async t => {
+  const f = await fixture(t);
+  const q = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+  // The CLI path after an update that moves it, for example into a new versioned package folder.
+  const updated = path.join(f.base, "updated sphinx cli ' entry.mjs");
+  await writeFile(updated, '');
+  await install({ ...f.options, agents: 'claude', platform: 'win32' });
+  const result = await install({ ...f.options, cliPath: updated, agents: 'auto', platform: 'win32' });
+  assert.deepEqual(result.agents, ['claude']);
+  assert.deepEqual(result.warnings, []);
+  const settings = await json(path.join(f.paths.claudeHome, 'settings.json'));
+  assert.equal(settings.hooks.SessionStart.length, 1);
+  assert.equal(settings.hooks.SessionStart[0].hooks[0].command, `SPHINX_HOME=${q(f.paths.home)} ${q(process.execPath)} ${q(updated)} hook agent claude`);
+  assert.deepEqual((await json(path.join(f.home, '.claude.json'))).mcpServers.sphinx.args, [updated, 'mcp']);
+  assert.deepEqual((await doctor({ env: f.env, cwd: f.repo, platform: 'win32' })).checks.filter(check => !check.ok), []);
+  // Only an integration the user opted into is kept: once it is gone, auto selects nothing and the hint returns.
+  await uninstall(f.options);
+  const bare = await install({ ...f.options, agents: 'auto', platform: 'win32' });
+  assert.deepEqual(bare.agents, []);
+  assert.deepEqual(bare.warnings, [WINDOWS_AGENT_HINT]);
+});

@@ -57,8 +57,8 @@ export const WINDOWS_AGENT_HINT = 'On Windows, Sphinx installs Git hooks only. A
 /**
  * Native Windows runs the Git hooks and, only when asked for, Claude Code.
  * `agents` is `auto`, `none`, a comma-separated list, or an array; `auto` and
- * `none` select nothing there. Call it before anything is saved, credentials
- * included, so a rejected selection leaves no trace.
+ * `none` never name an unsupported agent. Call it before anything is saved,
+ * credentials included, so a rejected selection leaves no trace.
  */
 export function checkAgentPlatform(agents, platform = process.platform) {
   if (platform !== 'win32') return;
@@ -214,8 +214,10 @@ export async function detectAgents({ env = process.env, platform = process.platf
 }
 
 async function prepareAgents({ agents, paths, env, cliPath, launcher, manifest, platform = process.platform }) {
+  // `auto` on native Windows detects no agent, but still refreshes a Claude Code integration the user opted into:
+  // its hook command and MCP server embed the CLI path, which an update can move.
   const selected = agents === 'auto'
-    ? platform === 'win32' ? [] : await detectedAgents({ paths, env, manifest })
+    ? platform === 'win32' ? (manifest.agents.claude ? ['claude'] : []) : await detectedAgents({ paths, env, manifest })
     : agents === 'none' ? [] : Array.isArray(agents) ? agents : agents.split(',').map(x => x.trim());
   if ((!selected.length && agents !== 'auto' && agents !== 'none') || selected.some(name => !AGENTS.includes(name))) throw new Error('--agents must be auto, none, or a comma-separated list of codex, claude, pi, cursor, opencode.');
   checkAgentPlatform(selected, platform); // Before any settings file is read: a rejected selection changes nothing.
