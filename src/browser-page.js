@@ -321,7 +321,9 @@ function render(state){
  $('resume').hidden=!(['paused','stopped'].includes(state.phase)&&state.resume);if(state.resume)$('resume-command').textContent=state.resume;scoreView(state.score);updateView(state.update);const messages=state.messages||[];
  // While Git waits, pausing stops it, so the button says so in the scope line's words.
  const op=operation(state);$('pause').textContent=state.waitingGit?'Stop '+op:'Pause check';
- text('waiting',finished?'':state.phase==='consent'?'The '+op+' waits for your choice. Closing this tab leaves it waiting.':state.waitingGit?'After you pass, you choose whether the '+op+' goes through. Closing this tab leaves it waiting; Stop '+op+' stops it.':'Closing this tab leaves the check waiting. Use Pause check to stop.');
+ // Unattended GUI Git shows nothing else while it waits, so when the hook will stop on its own the page says when.
+ const abandon=state.abandonAfterMs>0?'If every Sphinx tab stays closed for '+minutes(state.abandonAfterMs)+', the '+op+' stops; your progress is saved.':'';
+ text('waiting',finished?'':state.phase==='consent'?'The '+op+' waits for your choice. '+(abandon?abandon+' If you cancelled this '+op+' in your Git client, choose Stop '+op+'.':'Closing this tab leaves it waiting.'):state.waitingGit?'After you pass, you choose whether the '+op+' goes through. '+(abandon||'Closing this tab leaves it waiting; Stop '+op+' stops it.'):'Closing this tab leaves the check waiting. Use Pause check to stop.');
  const label=state.phase==='question'?'Question '+(state.progress.completed+1)+' of '+state.progress.total:state.phase==='working'?'Reviewing…':state.phase==='recovery'?'Review needs your decision':state.phase==='consent'?'Continue or stop':state.phase==='passed'?'Passed':state.phase==='paused'?(state.waitingGit?'Stopped':'Paused'):state.phase==='skipped'?'Skipped':state.phase==='stopped'?'Stopped':state.phase==='error'?'Check stopped':'Waiting…';
  const retry=state.phase==='question'&&[...messages].reverse().find(item=>item.kind==='question')?.followUp;
  text('status',label+(retry?' · Needs another answer':''));$('message').className='message'+(['passed','consent'].includes(state.phase)?' passed':'');scope(state,branch,label);$('status').className='status phase-'+state.phase+(state.phase==='working'?' busy':'')+(retry?' retry':'');if((state.phase==='question'&&!retry)||state.phase==='consent')$('status').hidden=true;text('message',state.message);text('error',state.phase==='recovery'?'':state.error);text('recovery-reason',state.phase==='recovery'?state.error:''); if(['passed','stopped'].includes(state.phase)&&String(state.message||'').includes('\\n')){const [lead,...rest]=state.message.split('\\n');text('message',lead);text('status',rest.join(' '));$('status').className='status passed-note';}
@@ -413,6 +415,8 @@ let change,changeFor,changeLoading=false,filter='all',query='',selected,diff,dif
 const el=(tag,className,value)=>{const node=document.createElement(tag);if(className)node.className=className;if(value!=null)node.textContent=value;return node;};
 const num=n=>Number(n).toLocaleString('en-US');
 const plural=(n,word)=>num(n)+' '+word+(n===1?'':'s');
+// The abandon window the way the hook's own message names it: whole minutes, at least one.
+const minutes=ms=>plural(Math.max(1,Math.round(ms/60000)),'minute');
 const short=oid=>oid?oid.slice(0,10):'';
 const announce=value=>{$('announce').textContent='';$('announce').textContent=value;};
 function totalsText(t){

@@ -438,6 +438,19 @@ test('the header button reads Stop push or Stop commit while Git waits, and Paus
   assert.equal(manual.nodes.status.textContent, 'Paused');
 });
 
+test('the waiting line explains the three-minute stop when the page is the only signal', () => {
+  const p = page(); p.update({ ...question, abandonAfterMs: 180000 });
+  assert.equal(p.nodes.waiting.textContent, 'After you pass, you choose whether the push goes through. If every Sphinx tab stays closed for 3 minutes, the push stops; your progress is saved.');
+  p.update({ ...question, sequence: 2, phase: 'passed', abandonAfterMs: 180000 });
+  assert.equal(p.nodes.waiting.hidden, true, 'a finished check is not waiting, so the line stays blank');
+  const deciding = page(); deciding.update({ ...consent, abandonAfterMs: 180000 });
+  assert.equal(deciding.nodes.waiting.textContent, 'The push waits for your choice. If every Sphinx tab stays closed for 3 minutes, the push stops; your progress is saved. If you cancelled this push in your Git client, choose Stop push.');
+  const commit = page(); commit.update({ ...question, event: 'pre-commit', abandonAfterMs: 50 });
+  assert.equal(commit.nodes.waiting.textContent, 'After you pass, you choose whether the commit goes through. If every Sphinx tab stays closed for 1 minute, the commit stops; your progress is saved.');
+  const idle = page(); idle.update({ ...question, abandonAfterMs: 0 });
+  assert.equal(idle.nodes.waiting.textContent, 'After you pass, you choose whether the push goes through. Closing this tab leaves it waiting; Stop push stops it.', 'only a positive window changes the line');
+});
+
 test('the context line names the model reviewing this check', () => {
   const p = page();
   p.update({ ...question, route: { provider: 'openrouter', model: 'qwen/qwen3-coder', tier: 'small' }, tokens: { input: 5200, output: 900, cost: 0.0014 } });
