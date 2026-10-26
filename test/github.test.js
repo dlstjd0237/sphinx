@@ -5,7 +5,7 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { COMMENT_MARKER, STATUS_CONTEXT, checkRecord, commentBody, githubRepository, runStampJob, scheduleStamp, statusFor, workflowTemplate } from '../src/github.js';
-import { DEFAULT_CONFIG, policyHash, validateConfig, validateRepositoryConfig } from '../src/config.js';
+import { DEFAULT_CONFIG, getPaths, policyHash, validateConfig, validateRepositoryConfig } from '../src/config.js';
 
 const snapshot = { event: 'pre-push', repoRoot: '/repo', head: 'b'.repeat(40), base: 'a'.repeat(40), stats: { files: 2, additions: 10, deletions: 1 }, target: { remote: 'origin', url: 'git@github.com:acme/widgets.git', ref: 'refs/heads/feature' } };
 const question = (id, prompt) => ({ id, prompt, choices: [], expectedAnswer: 'PRIVATE_KEY_TEXT', rationale: 'PRIVATE_RATIONALE', acceptance: { prediction: 'PRIVATE_PREDICTION', causalReason: 'x' } });
@@ -58,6 +58,15 @@ test('stamping is skipped for other hosts, commits, and when turned off, and nev
   assert.equal(calls[0][2].detached, true);
   const job = JSON.parse(await readFile(calls[0][1][1], 'utf8'));
   assert.deepEqual({ ...job, branchFile: undefined }, { version: 1, repo: { host: 'github.com', owner: 'acme', repo: 'widgets' }, sha: snapshot.head, branch: 'feature', branchFile: undefined, status: true, comment: false });
+});
+
+// Windows refuses to rename or remove a folder that a running process uses as its working directory, and a hook's is the repository.
+test('on Windows the stamp worker starts in the Sphinx home; elsewhere its launch is unchanged', async t => {
+  for (const platform of ['win32', 'linux']) {
+    const env = await home(t), calls = [];
+    assert.equal(await scheduleStamp({ snapshot, session, outcome: 'passed', config: config({}), env, spawnImpl: fakeSpawn(calls), platform }), true, platform);
+    assert.deepEqual(calls[0][2], platform === 'win32' ? { env, detached: true, stdio: 'ignore', cwd: getPaths(env).home } : { env, detached: true, stdio: 'ignore' }, platform);
+  }
 });
 
 function fakeGh(responses) {

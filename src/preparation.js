@@ -164,7 +164,7 @@ export async function preparationStatus({ cwd = process.cwd(), env = process.env
   return summary(record);
 }
 
-export async function schedulePreparation({ cwd = process.cwd(), env = process.env, cliPath, config, retry = false, spawnImpl = spawn } = {}) {
+export async function schedulePreparation({ cwd = process.cwd(), env = process.env, cliPath, config, retry = false, spawnImpl = spawn, platform = process.platform } = {}) {
   const plan = await planFor({ cwd, env, config });
   if (!plan.id) {
     if (plan.repo) {
@@ -187,8 +187,13 @@ export async function schedulePreparation({ cwd = process.cwd(), env = process.e
     const record = { version: 1, id: plan.id, status: 'scheduled', total: plan.snapshots.length, prepared: [], scheduledAt: now, updatedAt: now, pid: null };
     await writeJson(files.job(plan.id), record);
     try {
+      // Windows refuses to rename or remove a folder that a running process uses as its working directory, and this
+      // worker lives for minutes after a commit. So there it starts in the Sphinx home and is told its repository.
+      const windows = platform === 'win32';
       const child = spawnImpl(process.execPath, [cliPath, 'prepare', '--worker'], {
-        cwd: plan.repo.root, env: { ...env, SPHINX_PREPARATION_JOB: plan.id }, detached: true, stdio: 'ignore',
+        cwd: windows ? getPaths(env).home : plan.repo.root,
+        env: { ...env, SPHINX_PREPARATION_JOB: plan.id, ...(windows ? { SPHINX_PREPARATION_ROOT: plan.repo.root } : {}) },
+        detached: true, stdio: 'ignore',
       });
       await new Promise((resolve, reject) => { child.once('error', reject); child.once('spawn', resolve); });
       record.pid = child.pid;
@@ -204,7 +209,8 @@ export async function schedulePreparation({ cwd = process.cwd(), env = process.e
 
 export async function runPreparation({ cwd = process.cwd(), env = process.env, config, store, generate, wait = delay, curate } = {}) {
   if (env.SPHINX_EVALUATOR === '1') return { status: 'skipped', prepared: [], reason: 'Evaluator subprocesses do not prepare assessments.' };
-  const repo = await repository(cwd), files = filesFor(repo.root, env);
+  // A worker started in the Sphinx home (on Windows) is handed its repository, which its working directory does not name.
+  const repo = await repository(env.SPHINX_PREPARATION_ROOT || cwd), files = filesFor(repo.root, env);
   const latest = await readJson(files.latest, null);
   const id = env.SPHINX_PREPARATION_JOB || latest?.id;
   if (!JOB_ID.test(id || '')) return { status: 'skipped', prepared: [], reason: 'No preparation was scheduled.' };

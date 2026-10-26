@@ -1,14 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { DEFAULT_CONFIG, getPaths } from '../src/config.js';
 import { pushSnapshots, repository } from '../src/git.js';
 import { toggleYolo } from '../src/overrides.js';
 import { preparationStatus, runPreparation, schedulePreparation } from '../src/preparation.js';
+
+const CLI = fileURLToPath(new URL('../bin/sphinx.js', import.meta.url));
 
 async function fixture(t) {
   const directory = await mkdtemp(path.join(tmpdir(), 'sphinx-preparation-'));
@@ -391,4 +394,43 @@ test('the background worker curates the working context once before preparing, w
   assert.equal(curated.length, 1);
   assert.equal(curated[0].model, f.config.models.small.model);
   assert.match(curated[0].prompt, /count = 2/, 'The curator sees the unpushed change');
+});
+
+// Windows refuses to rename or remove a folder that a running process uses as its working directory, and a worker lives
+// for minutes after a commit. So on Windows it starts in the Sphinx home and is told its repository by environment.
+test('on Windows a worker starts in the Sphinx home and is told its repository; elsewhere its launch is unchanged', async t => {
+  for (const platform of ['win32', 'linux']) {
+    const f = await fixture(t), { root } = await repository(f.cwd);
+    const { jobId } = await schedulePreparation({ ...f.options, platform });
+    assert.equal(f.launches.length, 1, platform);
+    const [, , launch] = f.launches[0];
+    assert.deepEqual(launch, platform === 'win32'
+      ? { cwd: getPaths(f.env).home, env: { ...f.env, SPHINX_PREPARATION_JOB: jobId, SPHINX_PREPARATION_ROOT: root }, detached: true, stdio: 'ignore' }
+      : { cwd: root, env: { ...f.env, SPHINX_PREPARATION_JOB: jobId }, detached: true, stdio: 'ignore' }, platform);
+  }
+});
+
+test('a worker started in the Sphinx home prepares the repository named by SPHINX_PREPARATION_ROOT, exactly as the push checkpoint will', async t => {
+  const f = await fixture(t), { root } = await repository(f.cwd);
+  const { jobId } = await schedulePreparation(f.options);
+  const env = { ...f.env, SPHINX_PREPARATION_ROOT: root, SPHINX_PREPARATION_JOB: jobId };
+  const ready = await runPreparation({ ...f.options, cwd: getPaths(f.env).home, env, store: f.store });
+  const [actualPush] = await pushSnapshots({ cwd: f.cwd, env: f.env, config: f.config, remote: 'origin', remoteUrl: f.remoteUrl,
+    input: `refs/heads/main ${f.git('rev-parse', 'HEAD')} refs/heads/main ${f.base}\n` });
+  assert.equal(ready.status, 'ready');
+  assert.deepEqual(ready.prepared, [actualPush.id]); assert.deepEqual(f.generated, [actualPush.id]);
+});
+
+test('the CLI worker, launched in the Sphinx home as on Windows, finds its repository and runs its scheduled check', { timeout: 60000 }, async t => {
+  const f = await fixture(t), options = await loadedOptions(f);
+  await schedulePreparation({ ...options, cliPath: CLI, platform: 'win32' });
+  const [command, args, launch] = f.launches[0];
+  assert.equal(launch.cwd, getPaths(f.env).home);
+  const worker = spawnSync(command, args, { cwd: launch.cwd, env: launch.env, encoding: 'utf8', timeout: 45000 });
+  assert.equal(worker.status, 0, `${worker.stderr}${worker.error || ''}`);
+  // No reviewer is reachable offline (OpenRouter needs a key), so a worker that found its repository claims the check and
+  // ends it at the first model call. One that did not would have crashed and left the check scheduled.
+  const status = await preparationStatus(options);
+  assert.equal(status.status, 'failed');
+  assert.match(status.error, /authentication/i);
 });
