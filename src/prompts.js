@@ -122,7 +122,9 @@ export async function askInstall(config, initial, prompts, { detectedAgents = []
     const agents = values.agents === 'auto' ? detectedAgents : splitList(values.agents);
     // A coding plan reviews far faster than OpenRouter's free router. Prefer the
     // agent the user works in, then any Codex or Claude Code CLI installed here.
-    const plan = ['codex', 'claude'].find(name => agents.includes(name)) ?? ['claude', 'codex'].find(name => installedPlans.includes(name));
+    // On native Windows a connected Claude Code does not prove claude.exe exists (an npm-only install cannot start), so there the agent's plan must be installed too.
+    const runnable = name => platform !== 'win32' || installedPlans.includes(name);
+    const plan = ['codex', 'claude'].find(name => agents.includes(name) && runnable(name)) ?? ['claude', 'codex'].find(name => installedPlans.includes(name));
     const recommended = plan ? `${plan}-economy` : undefined;
     const current = hasExistingConfig ? 'keep' : recommended;
     for (;;) {

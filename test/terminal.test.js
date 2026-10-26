@@ -233,7 +233,7 @@ test('fresh onboarding asks agents first, recommends economical CLI models, then
       multiselect: async options => { order.push(options.title); return [agent]; },
       choose: async options => { order.push(options.title); assert.equal(options.requireSelection ?? false, false); return options.current; },
       text: async options => { order.push(options.title); return options.current; },
-    }, { hasExistingConfig: false });
+    }, { hasExistingConfig: false, platform: 'linux' });
     assert.deepEqual(order, ['Which coding agents do you use?', 'Choose your evaluator models', 'When should Sphinx check your understanding?']);
     for (const key of ['events', 'branches', 'remotes', 'level']) assert.equal(values[key], undefined);
     assert.equal(values.agents, agent);
@@ -251,7 +251,7 @@ test('fresh onboarding asks agents first, recommends economical CLI models, then
 test('fresh auto agent selection uses detection for the economical evaluator default', async () => {
   const values = await askInstall(DEFAULT_CONFIG, { ...onboardingPolicy, agents: 'auto' }, {
     choose: async options => { assert.equal(options.current, 'claude-economy'); return options.current; },
-  }, { hasExistingConfig: false, detectedAgents: ['claude', 'pi'] });
+  }, { hasExistingConfig: false, detectedAgents: ['claude', 'pi'], platform: 'linux' });
   assert.equal(values.small, presetOptions('claude-economy').small);
 });
 
@@ -288,7 +288,7 @@ test('partial tier flags preserve saved defaults but require a choice for fresh 
   let choices = 0;
   const values = await askInstall(DEFAULT_CONFIG, initial, {
     choose: async options => { choices++; assert.equal(options.current, 'claude-economy'); return options.current; },
-  }, { hasExistingConfig: false });
+  }, { hasExistingConfig: false, platform: 'linux' });
   assert.equal(choices, 1);
   const configured = applyInstallOptions(DEFAULT_CONFIG, values);
   assert.deepEqual(configured.models.small, { provider: 'codex', model: 'custom-small' });
@@ -366,4 +366,30 @@ test('setup recommends an installed coding plan even when the user works in anot
   assert.match(seen.choices[0].label, /\(recommended\)/);
   assert.equal(values.preset, 'claude-economy');
   assert.ok(seen.choices.some(choice => /free router \(slow, best effort\)/.test(choice.label)));
+});
+
+test('on Windows, guided setup recommends a reviewer CLI only when Windows can start it', async () => {
+  // Claude Code is the only agent offered there, but the CLI behind it may be an npm shim that cannot start.
+  const modelPicker = async (installedPlans, platform) => {
+    let seen;
+    await askInstall(DEFAULT_CONFIG, onboardingPolicy, {
+      multiselect: async () => ['claude'],
+      choose: async options => { if (options.title === 'Choose your evaluator models') seen = options; return options.current ?? 'openrouter-free'; },
+    }, { hasExistingConfig: false, installedPlans, platform });
+    return seen;
+  };
+  // An npm-only install leaves planProviders empty: nothing is recommended or preselected for Enter.
+  const npmOnly = await modelPicker([], 'win32');
+  assert.equal(npmOnly.current, undefined);
+  assert.equal(npmOnly.requireSelection, true);
+  assert.ok(npmOnly.choices.every(choice => !/\(recommended\)/.test(choice.label)));
+  // Only codex.exe starts: recommend that, not the Claude Code the user connects.
+  const codexOnly = await modelPicker(['codex'], 'win32');
+  assert.equal(codexOnly.current, 'codex-economy');
+  assert.equal(codexOnly.choices[0].value, 'codex-economy');
+  assert.match(codexOnly.choices[0].label, /\(recommended\)/);
+  // claude.exe starts: the agent the user works in stays the recommendation.
+  for (const plans of [['claude'], ['claude', 'codex']]) assert.equal((await modelPicker(plans, 'win32')).current, 'claude-economy');
+  // Other systems still trust the agent the user selected.
+  assert.equal((await modelPicker([], 'linux')).current, 'claude-economy');
 });
