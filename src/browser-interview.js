@@ -19,7 +19,7 @@ import { modelChoices, validChoice } from './model-choices.js';
 import { setRepositoryDistance } from './repo-config.js';
 import { pullRequestPush, usesSphinxAction } from './github.js';
 import { SESSION_ENV } from './activation.js';
-import { envValue } from './windows.js';
+import { envValue, withoutAddedCwdBlock } from './windows.js';
 import { stderrLine } from './terminal.js';
 
 const ID = /^[a-f0-9]{64}$/u;
@@ -61,7 +61,8 @@ export async function openQuestionnaireBrowser(url, { env = process.env, platfor
     // It is not detached and is unref'd, so a rundll32 stuck on a dialog of its own cannot keep the hook running once
     // Sphinx has stopped: libuv's job object ends it with the hook, while a browser it already started lives on.
     const system32 = path.win32.join(envValue(env, 'SystemRoot', 'win32') ?? process.env.SystemRoot ?? 'C:\\Windows', 'System32');
-    const clean = Object.fromEntries(Object.entries(env).filter(([key]) => !/^(GIT_|SPHINX_)/i.test(key)));
+    // Drop the command-search block Sphinx set for itself first: once the filter drops its SPHINX_ marker, it would look like the user's.
+    const clean = Object.fromEntries(Object.entries(withoutAddedCwdBlock(env)).filter(([key]) => !/^(GIT_|SPHINX_)/i.test(key)));
     return new Promise(resolve => {
       let child;
       try { child = spawnImpl(path.win32.join(system32, 'rundll32.exe'), ['url.dll,FileProtocolHandler', url], { cwd: system32, env: clean, stdio: 'ignore' }); }

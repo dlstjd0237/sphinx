@@ -80,6 +80,14 @@ test('on Windows the page opens in front through rundll32, with no shell, no hid
   assert.equal(killed, false, 'rundll32 is never killed');
 });
 
+test('on Windows rundll32 does not inherit the command-search block Sphinx set for itself, and keeps one the user set', { timeout: 5000 }, async () => {
+  const url = 'http://127.0.0.1:12345/token', envs = [];
+  const spawnImpl = (_command, _args, options) => { envs.push(options.env); const child = new EventEmitter(); setImmediate(() => child.emit('spawn')); return child; };
+  await openQuestionnaireBrowser(url, { platform: 'win32', env: { NoDefaultCurrentDirectoryInExePath: '1', SPHINX_ADDED_NO_CWD_SEARCH: '1', KEEP: 'z' }, spawnImpl });
+  await openQuestionnaireBrowser(url, { platform: 'win32', env: { NoDefaultCurrentDirectoryInExePath: '1', KEEP: 'z' }, spawnImpl });
+  assert.deepEqual(envs, [{ KEEP: 'z' }, { NoDefaultCurrentDirectoryInExePath: '1', KEEP: 'z' }]);
+});
+
 test('on Windows the program folder comes from SystemRoot in any letter case, else from this process, else C:\\Windows', { timeout: 5000 }, async () => {
   const url = 'http://127.0.0.1:12345/token', launched = [];
   const spawnImpl = (command, _args, options) => { launched.push([command, options.cwd]); const child = new EventEmitter(); setImmediate(() => child.emit('spawn')); return child; };
