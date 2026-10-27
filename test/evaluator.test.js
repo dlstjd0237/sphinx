@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import { access, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
-import { createEvaluator, findExecutable, parseModelJSON, planProviders, runProcess, validateQuestion, validateNewQuestion, QUESTION_SCHEMA, NEW_QUESTION_SCHEMA, GRADE_SCHEMA } from '../src/evaluator.js';
+import { createEvaluator, findExecutable, parseModelJSON, planProviders, runProcess, validateQuestion, validateNewQuestion, QUESTION_SCHEMA, NEW_QUESTION_SCHEMA, GRADE_SCHEMA, FLAGGED_FEEDBACK, EMPTY_FEEDBACK } from '../src/evaluator.js';
 import { DEFAULT_CONFIG } from '../src/config.js';
 import { evaluatorConfig, selectRoute } from '../src/routing.js';
 import { createSessionStore } from '../src/sessions.js';
@@ -446,6 +446,9 @@ test('feedback only explains a grade, so the grader\'s slips in it never block t
   const flagged = await grade({ questionValid: false, verdict: 'correct', feedback: '' });
   assert.equal(flagged.verdict, 'ambiguous');
   assert.match(flagged.feedback, FLAGGED);
+  // sessions.js recognizes Sphinx's own sentences by their exact text, so gradeAnswer must return the exported constants.
+  assert.equal(flagged.feedback, FLAGGED_FEEDBACK);
+  assert.equal(EMPTY_FEEDBACK, NONE);
   assert.match((await grade({ questionValid: false, verdict: 'ambiguous', feedback: '' })).feedback, FLAGGED);
   // No explanation at all, an overlong one cut at a word, and control characters.
   for (const feedback of [' ', null, undefined]) {

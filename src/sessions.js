@@ -5,7 +5,7 @@ import { withUsageMeter, withUsagePurpose, addUsage } from './usage.js';
 import { mkdir, open, readdir, stat, unlink } from 'node:fs/promises';
 import { DEFAULT_CONFIG, getPaths, readJson, writeJson, policyHash } from './config.js';
 import { selectRoute, evaluatorConfig, questionLimit } from './routing.js';
-import { generateAssessment, gradeAnswer, MODEL_OUTPUT_ERRORS } from './evaluator.js';
+import { generateAssessment, gradeAnswer, MODEL_OUTPUT_ERRORS, FLAGGED_FEEDBACK, EMPTY_FEEDBACK } from './evaluator.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { hasPreferences } from './repo-context.js';
 
@@ -103,10 +103,15 @@ export function savedDraft(session) {
 // Documentation-only changes need no understanding check and no model call.
 const DOCUMENTATION = /(?:^|\/)(?:readme|license|licence|changelog|changes|authors|contributors|notice|code_of_conduct|contributing)(?:\.[a-z]+)?$|\.(?:md|mdx|markdown|txt|rst|adoc)$/iu;
 export const documentationOnly = files => Array.isArray(files) && files.length > 0 && files.every(file => typeof file === 'string' && DOCUMENTATION.test(file));
+// Sphinx's own reason for a change with nothing to understand. A session keeps it in English; noQuestionCode lets each
+// screen draw it in the questionnaire language.
+export const DOCUMENTATION_REASON = 'Documentation-only change.';
 // Background preparation only records the reviewer's decision (pass = false); the
 // pass is made when someone starts the check, so a waiting push still asks first.
 function passWithoutQuestions(session, config, reason, pass = true, hold = false) {
   session.questions = []; session.index = 0; session.noQuestionReason = reason;
+  // Only that sentence has a code; a reason the reviewer chose is the reviewer's text and has none.
+  if (reason === DOCUMENTATION_REASON) session.noQuestionCode = 'documentation'; else delete session.noQuestionCode;
   if (pass) { session.status = 'passed'; session.passedAt = now(); session.expiresAt = new Date(Date.now() + config.receiptHours * 3600000).toISOString(); if (hold) session.held = { at: now() }; }
   session.preparation = { status: 'ready', completedAt: now() };
   delete session.reviewerCheckpoint;
@@ -125,8 +130,9 @@ export function publicSession(session) {
     ...(session.preparation ? { preparation: { status: session.preparation.status, ...(session.reviewerCheckpoint ? { resumable: true, minimumReviewerCalls: minimumReviewerCalls(session) } : {}), ...(session.review ? { toolCalls: session.review.toolCalls, compactions: session.review.compactions } : {}) } } : {}),
     // Concept labels are evaluator metadata and may themselves reveal the answer.
     ...(q && session.status !== 'passed' ? { question: { id: q.id, prompt: q.prompt, choices: q.choices } } : {}),
-    ...(session.lastFeedback ? { feedback: session.lastFeedback } : {}),
-    ...(session.status === 'passed' ? { expiresAt: session.expiresAt, ...(session.noQuestionReason ? { noQuestionReason: session.noQuestionReason } : {}), ...(session.held ? { held: true } : {}) } : {}),
+    // A code beside feedback or noQuestionReason says the English text is one of Sphinx's own sentences.
+    ...(session.lastFeedback ? { feedback: session.lastFeedback, ...(session.lastFeedbackCode ? { feedbackCode: session.lastFeedbackCode } : {}) } : {}),
+    ...(session.status === 'passed' ? { expiresAt: session.expiresAt, ...(session.noQuestionReason ? { noQuestionReason: session.noQuestionReason, ...(session.noQuestionCode ? { noQuestionCode: session.noQuestionCode } : {}) } : {}), ...(session.held ? { held: true } : {}) } : {}),
   };
 }
 
@@ -276,7 +282,7 @@ export function createSessionStore({ env = process.env, generate = generateAsses
       signal?.throwIfAborted();
       if (!session.questions.length && session.status === 'pending' && documentationOnly(session.snapshot.files)) {
         await validate(session.snapshot, config);
-        passWithoutQuestions(session, config, 'Documentation-only change.', true, hold);
+        passWithoutQuestions(session, config, DOCUMENTATION_REASON, true, hold);
         await save(session);
         return publicSession(session);
       }
@@ -421,6 +427,10 @@ export function createSessionStore({ env = process.env, generate = generateAsses
       if (scoreThis) session.scored = [...(session.scored || []), scoredIndex];
       // The grader is asked to skip feedback on a correct answer; if it wrote some anyway, show it.
       session.lastFeedback = result.feedback;
+      // Sphinx's own sentences stay English here; their code lets each screen draw them in the questionnaire language.
+      // Anything else is the grader's text and has no code.
+      const feedbackCode = result.feedback === FLAGGED_FEEDBACK ? 'flagged' : result.feedback === EMPTY_FEEDBACK ? 'empty' : undefined;
+      if (feedbackCode) session.lastFeedbackCode = feedbackCode; else delete session.lastFeedbackCode;
       if (result.verdict === 'correct') {
         session.index += 1;
         if (session.index === session.questions.length) {
@@ -527,7 +537,7 @@ export function createSessionStore({ env = process.env, generate = generateAsses
       const session = await read(id);
       if (session.status !== 'pending' || session.questions.length || !documentationOnly(session.snapshot.files)) return false;
       await validate(session.snapshot, config);
-      passWithoutQuestions(session, config, 'Documentation-only change.');
+      passWithoutQuestions(session, config, DOCUMENTATION_REASON);
       await save(session);
       return true;
     }).catch(error => { if (error.code === 'SPHINX_SESSION_BUSY') return false; throw error; });
