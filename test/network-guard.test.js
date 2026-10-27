@@ -46,6 +46,6 @@ test('on Windows, tests cannot start a real claude, codex, or gh CLI', { skip: p
   assert.throws(() => spawnSync('C:\\Users\\x\\.local\\bin\\claude.exe', []), blocked);
   assert.throws(() => execSync('gh --version'), blocked);
   assert.throws(() => execSync('"C:\\Program Files\\GitHub CLI\\gh.exe" --version'), blocked);
-  await assert.rejects(async () => promisify(execFile)('claude', []), blocked);
+  await assert.rejects(async () => promisify(execFile)('claude', ['--version']), blocked);
   assert.match(execFileSync('git', ['--version'], { encoding: 'utf8' }), /^git version/u);
 });
