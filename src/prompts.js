@@ -77,7 +77,7 @@ export function installLanguage({ hasExistingConfig, current, system = systemLan
 export function languageQuestion(current) {
   return {
     title: 'Which language should questionnaires use?',
-    description: 'Questions, feedback, and questionnaire screens use this language. Command output, Git hook messages, and GitHub text stay in English. Change it later with sphinx config --language.',
+    description: 'Questions, feedback, and questionnaire screens use this language, including questions quoted in GitHub comments. Command output, Git hook messages, and Sphinx\'s own GitHub text stay in English. Change it later with sphinx config --language.',
     current,
     choices: [
       { value: 'en', label: 'English', description: 'Questions and questionnaire screens in English.' },
