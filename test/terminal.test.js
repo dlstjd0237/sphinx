@@ -85,6 +85,18 @@ test('displayWidth counts Hangul, emoji, ZWJ sequences, NFD jamo and ANSI by dis
   assert.equal(displayWidth(ascii), ascii.length);
 });
 
+test('a soft hyphen takes one column, so English text with soft hyphens wraps as it did before display widths', () => {
+  // Terminals draw U+00AD, so it is the one format character that is not zero-width.
+  assert.equal(displayWidth('\u{AD}'), 1);
+  assert.equal(displayWidth('re\u{AD}try'), 6);
+  assert.equal(displayWidth('\u{200B}\u{AD}\u{2060}'), 1);
+  // Expected output from wrapText as it was before Sphinx measured display columns, when each UTF-16 unit was one column.
+  const text = 'Pass the idem\u{AD}po\u{AD}tency key to every re\u{AD}try so the pay\u{AD}ment runs once, and in\u{AD}ter\u{AD}na\u{AD}tion\u{AD}al\u{AD}iza\u{AD}tion stays in\u{AD}tact.';
+  assert.equal(wrapText(text, 30, '  '), '  Pass the idem\u{AD}po\u{AD}tency key\n  to every re\u{AD}try so the\n  pay\u{AD}ment runs once, and\n  in\u{AD}ter\u{AD}na\u{AD}tion\u{AD}al\u{AD}iza\u{AD}tion\n  stays in\u{AD}tact.');
+  assert.equal(wrapText(text, 20), 'Pass the\nidem\u{AD}po\u{AD}tency key to\nevery re\u{AD}try so the\npay\u{AD}ment runs once,\nand\nin\u{AD}ter\u{AD}na\u{AD}tion\u{AD}al\u{AD}iz\na\u{AD}tion stays\nin\u{AD}tact.');
+  assert.ok(fits(wrapText(text, 30, '  '), 30) && fits(wrapText(text, 20), 20));
+});
+
 test('wrapText never exceeds the width with Korean text', () => {
   const text = '이 변경은 재시도 때 같은 결제가 두 번 저장될 수 있는지 확인합니다. 답을 보내기 전에 코드를 먼저 살펴보고, 확신이 없으면 /learn 으로 설명을 요청해 주세요.';
   for (const width of [20, 30, 80]) {

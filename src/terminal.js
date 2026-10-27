@@ -3,12 +3,13 @@ export const stripAnsi = value => String(value).replace(ANSI, '');
 const ANSI_PARTS = new RegExp(`(${ANSI.source})`);
 
 // Terminal columns, not UTF-16 units: Hangul, CJK and emoji take two, marks and joiners none. Measured per grapheme,
-// so a ZWJ sequence or a decomposed Hangul syllable is one cell. The rules are spec 4.7.
+// so a ZWJ sequence or a decomposed Hangul syllable is one cell. A soft hyphen is the one format character that takes a
+// column, because terminals draw it.
 // The segmenter is built on first use: loading its break rules takes about 10 ms, which every Sphinx start would pay
 // although English text never needs it.
 let segmenter;
 const graphemes = text => (segmenter ??= new Intl.Segmenter('en', { granularity: 'grapheme' })).segment(text);
-const NO_COLUMN = /^[\p{Mn}\p{Me}\p{Cf}\u{1160}-\u{11FF}\u{D7B0}-\u{D7FF}]+$/u;
+const NO_COLUMN = /^[[\p{Mn}\p{Me}\p{Cf}\u{1160}-\u{11FF}\u{D7B0}-\u{D7FF}]--\u{AD}]+$/v;
 const TWO_COLUMNS = /\u{FE0F}|\p{Emoji_Presentation}|[\u{1100}-\u{115F}\u{2E80}-\u{A4CF}\u{AC00}-\u{D7A3}\u{F900}-\u{FAFF}\u{FE30}-\u{FE4F}\u{FF00}-\u{FF60}\u{FFE0}-\u{FFE6}\u{20000}-\u{3FFFD}]/u;
 const graphemeWidth = grapheme => NO_COLUMN.test(grapheme) ? 0 : TWO_COLUMNS.test(grapheme) ? 2 : 1;
 export function displayWidth(text) {
