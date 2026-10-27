@@ -11,6 +11,9 @@ const MAX_CONSECUTIVE_DUPLICATES = 3;
 // Without a call cap, investigation still has to converge: it closes at this
 // multiple of the size-based planning target and the reviewer must finish.
 const UNCAPPED_INVESTIGATION_FACTOR = 2;
+// With a Korean questionnaire every turn repeats the language rule, since Pi compaction may summarize the first
+// message that carries the full instruction. Kept here: evaluator.js imports this module, not the other way round.
+const TURN_LANGUAGE_TEXT = 'Write each question\'s prompt and noQuestionReason in Korean; keep every other field in English.';
 const TOOL_NAMES = new Set(['list_files', 'read_file', 'read_diff', 'search']);
 const REVIEW_TOOL_NAMES = new Set([...TOOL_NAMES, 'read_evidence', 'review_feedback']);
 const bytes = value => Buffer.byteLength(typeof value === 'string' ? value : JSON.stringify(value));
@@ -448,13 +451,14 @@ async function review({ snapshot, config, assessmentSchema, assessmentInstructio
       const archiveAvailable = Boolean(saved) || compactions > 0;
       const availableNames = new Set([...REVIEW_TOOL_NAMES].filter(name => archiveAvailable || name !== 'read_evidence'));
       if (finishOnly && ![...archive.values()].some(changedDiff)) fail('The reviewer did not collect changed-code diff evidence before its final request. No assessment was accepted.', 'INSUFFICIENT_EVIDENCE');
-      const phase = finishOnly
+      let phase = finishOnly
         ? 'Final synthesis: investigation is closed. Submit finish_review now using only collected evidence. Write fewer questions if needed; never invent support or request further reads.'
         : remaining() === (auditAssessment ? 3 : 2)
           ? 'One investigation request remains before the reserved final synthesis request. Finish now if sufficient evidence is available; otherwise batch only the missing reads needed for a grounded question.'
           : uncapped && calls >= tierLimit
             ? `The ${tierLimit}-request planning target for this change size is reached. Finish now unless one specific missing read is essential to ground a question.`
             : 'Investigate consequential behavior, then finish as soon as a useful question is grounded.';
+      phase += config.language === 'ko' ? ` ${TURN_LANGUAGE_TEXT}` : '';
       let toolCalls, nativeMessage;
       if (nativeTools) {
         // Keep schemas for earlier calls in the conversation: some providers

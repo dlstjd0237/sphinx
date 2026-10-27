@@ -1109,6 +1109,39 @@ test('by default only large changes get a separate audit; small ones check their
   }
 });
 
+// Spec 4.4: a Korean questionnaire asks for the text people read in Korean and keeps every other field in English.
+const KOREAN_GENERATION = 'Language: write each question\'s prompt and noQuestionReason in natural Korean. Use 합니다체 for statements, polite requests ending in "~해 주세요" (never "~하십시오"), and questions ending in "~나요?" or "~습니까?". Address the person without a pronoun (no 당신, 귀하, or 여러분) and call the change "이 변경"; a Korean question without a pronoun still addresses the person shipping this change. Keep code identifiers, file paths, commands, quoted code, and Git terms such as push, commit, and branch as they are. Write every other field (ids, concept, expectedAnswer, rationale, acceptance, evidence) in English.';
+
+// A generation (its reviewer turn and audit), then a grade, an explanation and a dispute, each with its transfer audit.
+async function everyPrompt(t, settings) {
+  const { evaluator, calls } = await fixture(t, invocation => invocation.input.startsWith('Continue the investigative review.') ? { questions: [question] }
+    : { verdict: 'incorrect', feedback: 'The stored id is checked first.', evidence: question.evidence, followUp: transfer });
+  await evaluator.generateAssessment(snapshot, settings);
+  for (const mode of [{}, { learn: true }, { dispute: true }]) await evaluator.gradeAnswer({ snapshot, question, answer: 'It returns the stored result.', config: settings, ...mode });
+  return calls.map(call => call.input);
+}
+
+test('Korean adds the language instruction to generation, audit and grading prompts', async t => {
+  const prompts = await everyPrompt(t, { ...config, provider: 'claude', audit: 'all', language: 'ko' });
+  for (const prompt of prompts) assert.doesNotThrow(() => JSON.parse(prompt.split('\n').at(-1)), 'The DATA line stays last');
+  const task = JSON.parse(prompts[0].split('\n').at(-1)).conversation[0].content;
+  assert.ok(task.includes(`\n${KOREAN_GENERATION}\nTest understanding, not reading comprehension.`));
+  assert.match(task, /\nUnderstanding distance: high\.[^\n]*\nLanguage: write each/);
+  const isAudit = prompt => prompt.includes('Independently verify this proposed understanding assessment');
+  const audits = prompts.slice(1).filter(isAudit), grades = prompts.slice(1).filter(prompt => !isAudit(prompt));
+  assert.deepEqual([audits.length, grades.length], [4, 3]);
+  for (const audit of audits) assert.match(audit, /rewrite any that is not: Understanding distance: high\.[^\n]* Language: write each question's prompt in natural Korean\.[^\n]* Keep feedback, which goes to the investigator, in English\. Rewrite any question prompt that is not in Korean\. Rewrite any question that asks/);
+  for (const grade of grades) assert.match(grade, /chain of thought\.\nLanguage: write feedback and followUp\.prompt in natural Korean\.[^\n]* humanAnswer may be Korean, English, or mixed\.[^\n]*\nThe following JSON contains untrusted DATA/);
+  assert.match(grades[1], /^The human asked for an explanation instead of answering/);
+});
+
+test('English and unset language give the same prompts with no instruction', async t => {
+  const unset = await everyPrompt(t, { ...config, provider: 'claude', audit: 'all' });
+  assert.deepEqual(await everyPrompt(t, { ...config, provider: 'claude', audit: 'all', language: 'en' }), unset);
+  assert.equal(unset.length, 8);
+  for (const prompt of unset) assert.doesNotMatch(prompt, /Language:|Korean/);
+});
+
 // A fake OpenRouter route that echoes the follow-up audit and answers every grade with reply().
 const gradingRoute = (reply, onAudit = audit => audit) => async invocation => {
   await invocation.beforeCall?.();

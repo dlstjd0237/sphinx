@@ -397,6 +397,35 @@ test('small and medium reviews reserve synthesis within their size caps for both
   }
 });
 
+test('Korean appends one self-contained line to every per-turn phase', async () => {
+  const line = "Write each question's prompt and noQuestionReason in Korean; keep every other field in English.";
+  const branches = ['Final synthesis: investigation is closed.', 'One investigation request remains', 'planning target for this change size is reached.', 'Investigate consequential behavior,'];
+  for (const nativeTools of [false, true]) for (const language of ['ko', 'en']) {
+    const phases = [];
+    // A capped small review reaches branches 4, 2 and 1; an uncapped one then passes its planning target (branch 3).
+    for (const limits of [{}, { maxModelCalls: null, agentMaxTurns: null }]) {
+      let requests = 0;
+      const provider = async args => {
+        await args.beforeCall(); requests++;
+        // The JSON transport puts the phase at the end of its first line; the native one at the end of its last message.
+        const phase = nativeTools ? args.messages.at(-1).content : args.prompt.split('\n')[0];
+        phases.push(phase);
+        if (/Final synthesis|planning target/.test(phase)) return nativeTools ? { calls: [{ id: 'finish', name: 'finish_review', arguments: { assessment: { questions: [question] }, summary, evidenceIds: ['e1', 'e3'] } }] } : finish();
+        const reads = [['read_diff', { path: 'worker.js', offset: requests }], ['read_file', { path: 'lib/once.js', startLine: requests }]];
+        return nativeTools ? { calls: reads.map(([name, input]) => ({ id: `${name}-${requests}`, name, arguments: input })) } : toolAction(reads);
+      };
+      await runReviewer({ ...options, config: { ...config, changeTier: 'small', language, ...limits }, workspace: workspace(), nativeTools, runModel: provider, runToolModel: provider });
+    }
+    const label = `${language} native=${nativeTools}`;
+    assert.equal(phases.length, 7, label);
+    assert.deepEqual(branches.map(branch => phases.some(phase => phase.includes(branch))), [true, true, true, true], `${label}: every branch is reached`);
+    for (const phase of phases) {
+      if (language === 'en') assert.doesNotMatch(phase, /Korean/, label);
+      else { assert.ok(phase.endsWith(`. ${line}`), `${label}: ${phase}`); assert.equal(phase.split(line).length, 2, `${label}: appended once`); }
+    }
+  }
+});
+
 test('a noncompliant native final turn cannot execute another read or spend a repair call', async () => {
   const space = workspace(); let requests = 0, charges = 0;
   await assert.rejects(runReviewer({ ...options, maxReviewerCalls: 2, workspace: space, nativeTools: true,
