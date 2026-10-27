@@ -56,7 +56,7 @@ flowchart LR
 | `sessions.js` | Durable checkpoints, locks, progress, counted calls and optional caps, expiration |
 | `presentations.js` | Session-bound queues and hook-owned presentation markers, without code or answers |
 | `git-gate.js` | Waiting Git gate, exact snapshot/receipt revalidation, batch ownership, and fallback |
-| `browser-interview.js`, `browser-page.js` | Loopback human questionnaire, background browser opening, recovery, cancellation, and batch reuse |
+| `browser-interview.js`, `browser-page.js` | Loopback human questionnaire, browser opening, recovery, cancellation, and batch reuse |
 | `change-view.js` | Read-only questionnaire display of the frozen checkpoint comparison: file list, per-file stats, diffs, and verified question evidence ranges |
 | `git-interview.js` | Explicit separate-terminal transport retained for compatibility |
 | `native-check.js` | Direct human-form assessment loop, queue claims, cancellation, and summary-only results |

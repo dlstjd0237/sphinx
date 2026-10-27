@@ -96,7 +96,7 @@ export default function Home() {
 
         <section className="start" id="start">
           <h2>Start in a minute.</h2>
-          <pre><code><span className="c"># Node 22.19+ · macOS, Linux, or WSL</span>{'\n'}npm install -g sphinx-understand{'\n'}sphinx install{'\n\n'}<span className="c"># then push as usual</span>{'\n'}git push</code></pre>
+          <pre><code><span className="c"># Node 22.19+ · macOS, Linux, WSL, or Windows with Git for Windows</span>{'\n'}npm install -g sphinx-understand{'\n'}sphinx install{'\n\n'}<span className="c"># then push as usual</span>{'\n'}git push</code></pre>
           <p className="more">
             <code>sphinx install</code> connects Git and your coding agents and asks which model should review.{' '}
             <a href={`${REPO}#readme`}>Read the docs</a> for everything else.
