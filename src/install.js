@@ -448,9 +448,9 @@ export async function dispatchHook({ event, args = [], input = '', cwd = process
       // Windows cannot start an extensionless `#!` script, so Git's sh runs it, finding the interpreter by the name in its
       // shebang as Git does (RUN_HOOK). MSYS2 strips quotes from and globs unquoted arguments, so every one is quoted. The hook
       // searches for commands as it would under Git alone; libuv reads the cwd-search block from this process, so finding `sh`
-      // stays protected.
+      // stays protected. Its $0 has forward slashes, as Git for Windows gives it, for hooks that use "${0##*/}" or "${0%/*}".
       const child = platform === 'win32'
-        ? spawnImpl('sh', ['-c', `${RUN_HOOK}\nrun_hook "$0" "$@"`, original, ...args].map(msys2Quote), { cwd, env: withoutAddedCwdBlock({ ...env, SPHINX_HOOK_DEPTH: '1' }), stdio, windowsVerbatimArguments: true })
+        ? spawnImpl('sh', ['-c', `${RUN_HOOK}\nrun_hook "$0" "$@"`, original.replaceAll('\\', '/'), ...args].map(msys2Quote), { cwd, env: withoutAddedCwdBlock({ ...env, SPHINX_HOOK_DEPTH: '1' }), stdio, windowsVerbatimArguments: true })
         : spawnImpl(original, args, { cwd, env: { ...env, SPHINX_HOOK_DEPTH: '1' }, stdio });
       // A hook may exit without reading stdin: EPIPE on POSIX, EOF on Windows.
       child.stdin?.on('error', error => { if (!['EPIPE', 'EOF'].includes(error.code)) reject(error); });

@@ -201,7 +201,7 @@ test('on Windows the original hook runs through sh with every argument quoted', 
   assert.equal(await run('win32', added), 0);
   const [win] = calls;
   assert.equal(win.command, 'sh');
-  assert.deepEqual(win.args, ['-c', `${RUN_HOOK}\nrun_hook "$0" "$@"`, hook, ...args].map(msys2Quote));
+  assert.deepEqual(win.args, ['-c', `${RUN_HOOK}\nrun_hook "$0" "$@"`, hook.replaceAll('\\', '/'), ...args].map(msys2Quote));
   assert.equal(win.options.windowsVerbatimArguments, true);
   assert.equal(win.options.cwd, f.repo);
   assert.deepEqual(win.options.stdio, ['pipe', 'inherit', 'inherit']);
@@ -224,6 +224,46 @@ test('on Windows the original hook runs through sh with every argument quoted', 
   assert.equal('windowsVerbatimArguments' in posix.options, false);
   assert.deepEqual(posix.options.env, { ...added, SPHINX_HOOK_DEPTH: '1' });
   assert.equal(calls.length, 3);
+});
+
+test('on Windows a chained hook gets its own path with forward slashes, as Git for Windows gives it; elsewhere the path is as it is', async t => {
+  const f = await fixture(t);
+  // A hooks folder whose path has a backslash on every platform: a separator on Windows, part of a folder name elsewhere.
+  const hooks = path.join(f.base, 'old\\hooks'), hook = path.join(hooks, 'pre-push');
+  await executable(hook, '#!/bin/sh\nexit 0\n');
+  f.git('config', '--global', 'core.hooksPath', hooks);
+  await install(f.options);
+  const calls = [];
+  const spawnImpl = (command, args) => {
+    calls.push({ command, args });
+    const child = new EventEmitter();
+    child.stdin = { on() {}, end() {} };
+    setImmediate(() => child.emit('close', 0, null));
+    return child;
+  };
+  for (const platform of ['win32', 'linux']) assert.equal(await dispatchHook({ event: 'pre-push', args: ['origin', 'url'], input: '', cwd: f.repo, env: f.env, gate: async () => 0, spawnImpl, platform }), 0, platform);
+  const [win, posix] = calls;
+  // $0 of the hook: a multiplexing hook matches "${0##*/}", and one that loads a file beside itself uses "${0%/*}".
+  assert.equal(win.args[2], msys2Quote(hook.replaceAll('\\', '/')));
+  assert.doesNotMatch(win.args[2], /\\/);
+  assert.equal(posix.command, hook);
+});
+
+test('on Windows a chained hook that reads its name or folder from $0 runs as it would under Git alone', { skip: process.platform !== 'win32', timeout: 60000 }, async t => {
+  const f = await fixture(t);
+  await install(f.options);
+  const hooks = path.join(f.git('rev-parse', '--path-format=absolute', '--git-common-dir'), 'hooks'), output = path.join(f.base, 'zero');
+  const run = env => dispatchHook({ event: 'pre-push', args: ['origin', 'url'], input: 'refs/heads/main 1 refs/heads/main 2\n', cwd: f.repo, env: withGitShell(env), gate: async () => 0 });
+  // One script for several hooks picks its branch by the name it was started as; this branch rejects the push.
+  await executable(path.join(hooks, 'pre-push'), '#!/bin/sh\ncase "${0##*/}" in pre-push) exit 1 ;; esac\nexit 0\n');
+  assert.equal(await run(f.env), 1);
+  // A hook that loads a file beside it, and records the path it was given.
+  await writeFile(path.join(hooks, 'lib.sh'), 'code=5\n');
+  await executable(path.join(hooks, 'pre-push'), '#!/bin/sh\nprintf %s "$0" > "$SPHINX_TEST_OUTPUT"\n. "${0%/*}/lib.sh"\nexit "$code"\n');
+  assert.equal(await run({ ...f.env, SPHINX_TEST_OUTPUT: output }), 5);
+  const zero = await readFile(output, 'utf8');
+  assert.doesNotMatch(zero, /\\/);
+  assert.match(zero, /\/\.git\/hooks\/pre-push$/);
 });
 
 test('an existing pre-push hook in a path with Hangul, an apostrophe, braces and spaces still chains', async t => {
