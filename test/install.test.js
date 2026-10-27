@@ -1004,6 +1004,52 @@ test('Windows install with auto keeps refreshing an opted-in Claude Code integra
   assert.deepEqual(bare.warnings, [WINDOWS_AGENT_HINT]);
 });
 
+test('on Windows doctor reports a Node or Sphinx CLI file that the hooks start and that is gone, and the install that fixes it', async t => {
+  const dispatchers = ['pre-push', 'pre-commit', 'post-commit', 'post-merge', 'post-rewrite', 'post-checkout'].map(event => `${event} dispatcher`);
+  const failing = async f => (await doctor({ env: f.env, cwd: f.repo, platform: 'win32' })).checks.filter(check => !check.ok);
+  const gone = (f, command) => ({ ok: false, detail: `Sphinx's hooks start ${f.cliPath}, which no longer exists. Run ${command}.` });
+  const f = await fixture(t);
+  await install({ ...f.options, agents: 'claude', platform: 'win32' });
+  assert.deepEqual(await failing(f), []);
+  // An update that moves the CLI, as every pnpm update does when it deletes the old version's folder.
+  await rm(f.cliPath);
+  assert.deepEqual(await failing(f), [...dispatchers, 'claude integration'].map(name => ({ name, ...gone(f, 'sphinx install') })));
+  // An entry written before this record existed is not checked.
+  const manifest = await json(f.paths.install);
+  delete manifest.installs.global.launch; delete manifest.agents.claude.launch;
+  await writeFile(f.paths.install, JSON.stringify(manifest));
+  assert.deepEqual(await failing(f), []);
+
+  // A repository's own install is repaired in that repository.
+  const g = await fixture(t);
+  await install({ ...g.options, platform: 'win32' });
+  await install({ ...g.options, repo: true, platform: 'win32' });
+  await rm(g.cliPath);
+  assert.deepEqual(await failing(g), dispatchers.map(name => ({ name, ...gone(g, 'sphinx install --repo') })));
+
+  // Elsewhere nothing is recorded, and the hook scripts stay as they were.
+  for (const platform of ['linux', 'darwin']) {
+    const h = await fixture(t);
+    await install({ ...h.options, agents: 'claude', platform });
+    const posix = await json(h.paths.install);
+    assert.equal('launch' in posix.installs.global, false, platform);
+    assert.equal('launch' in posix.agents.claude, false, platform);
+    for (const event of ['pre-push', 'pre-commit']) assert.doesNotMatch(await readFile(path.join(h.paths.home, 'hooks', 'global', event), 'utf8'), /no longer exists/, platform);
+  }
+});
+
+test('on Windows a gated dispatcher whose Sphinx CLI is gone says what to run and blocks, instead of a stack trace', { skip: process.platform !== 'win32', timeout: 60000 }, async t => {
+  const f = await fixture(t);
+  await install(f.options);
+  const hookDir = f.git('config', '--global', '--get', 'core.hooksPath');
+  await rm(f.cliPath);
+  for (const event of ['pre-push', 'pre-commit']) {
+    const run = spawnSync('sh', [path.join(hookDir, event), 'origin', 'url'], { cwd: f.repo, env: withGitShell(f.env), encoding: 'utf8', input: '' });
+    assert.equal(run.status, 1, event);
+    assert.equal(run.stderr, `Sphinx's hooks start ${f.cliPath}, which no longer exists. Run sphinx install.\n`, event);
+  }
+});
+
 test('on native Windows the Claude Code post-tool hooks also match PowerShell tool calls, and uninstall restores the settings exactly', async t => {
   // Claude Code on Windows runs git through its PowerShell tool as well as its Bash tool. Every other platform and Codex keep `Bash`.
   const handler = { type: 'command', command: 'sphinx hook agent claude', timeout: 10 };

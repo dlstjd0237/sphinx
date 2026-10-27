@@ -24,6 +24,8 @@ const GATED = new Set(['pre-push', 'pre-commit']);
 const PREPARED = new Set(['post-commit', 'post-merge', 'post-rewrite', 'post-checkout']);
 const hash = value => createHash('sha256').update(value).digest('hex');
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+// Native Windows hooks start node.exe and the CLI by their paths at install, which a pnpm update or removing a Node version deletes.
+const launchGone = (file, repo) => `Sphinx's hooks start ${file}, which no longer exists. Run sphinx install${repo ? ' --repo' : ''}.`;
 
 /**
  * The shell command hooks use to run Sphinx. Prefer the package manager's own
@@ -106,6 +108,12 @@ async function exists(file) {
   }
 }
 
+// The first file of a recorded Windows `launch` that can no longer be opened, if any.
+async function missingLaunchFile(launch) {
+  for (const file of launch ? [launch.node, launch.cli] : []) if (!await access(file).then(() => true, () => false)) return file;
+  return null;
+}
+
 async function readJson(file, fallback) {
   try {
     const value = JSON.parse(await readFile((await settingsTarget(file)).path, 'utf8'));
@@ -173,10 +181,13 @@ function sourceShell(source) {
     : 'if ! hook_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then\n  if [ -z "${GIT_DIR:-}" ] || [ ! -d "$GIT_DIR" ]; then\n    git rev-parse --git-common-dir >/dev/null\n    exit 128\n  fi\n  hook_dir=$GIT_DIR\nfi\nhook_dir="$hook_dir/hooks"\n';
 }
 
-function hookScript({ event, source, launcher, home, id, platform = process.platform }) {
+function hookScript({ event, source, launcher, home, id, platform = process.platform, launch }) {
   const header = '#!/bin/sh\n# Managed by Sphinx. Existing hooks remain in their original directory.\n';
   if (GATED.has(event)) {
-    return `${header}SPHINX_HOME=${quote(home)} SPHINX_INSTALL_ID=${quote(id)} ${launcher.env}exec ${launcher.command} hook git ${quote(event)} "$@"\n`;
+    // `launch` is recorded on Windows only. A Git client shows a failed hook's output as its error, so name the missing file
+    // and the fix instead of Node's stack trace; the operation still stops.
+    const present = launch ? [launch.node, launch.cli].map(file => `[ -e ${quote(file)} ] || { printf '%s\\n' ${quote(launchGone(file, id !== 'global'))} >&2; exit 1; }\n`).join('') : '';
+    return `${header}${present}SPHINX_HOME=${quote(home)} SPHINX_INSTALL_ID=${quote(id)} ${launcher.env}exec ${launcher.command} hook git ${quote(event)} "$@"\n`;
   }
   // Git's sh alone would not find the interpreter of a Windows hook's `#!` line the way Git does, so native Windows runs the
   // existing hook through run_hook. Everywhere else the scripts are exactly as they always were.
@@ -282,6 +293,8 @@ export async function install({ config, agents = 'auto', repo = false, cwd = pro
   const previous = manifest.installs[id];
   // Validate every selected settings file before mutating any integration.
   const launcher = await sphinxLauncher(cliPath, env, process.execPath, platform);
+  // What the Windows hooks, and the Claude Code hook and MCP server, start by path, so doctor can tell when an update moved it.
+  const launch = platform === 'win32' ? { node: process.execPath, cli: cliPath } : undefined;
   const agentPlans = await prepareAgents({ agents, paths, env, cliPath, launcher, manifest, platform });
   const scopeValues = await currentConfig(info.scope, cwd, env);
   if (previous && scopeValues.at(-1) !== previous.hookDir) {
@@ -299,7 +312,7 @@ export async function install({ config, agents = 'auto', repo = false, cwd = pro
   });
   if (directoryState?.isSymbolicLink()) throw new Error(`Refusing to replace a symlinked hook directory: ${entry.hookDir}`);
   const names = await hookNames(entry.source, cwd, env);
-  const scripts = names.map(event => ({ event, content: hookScript({ event, source: entry.source, launcher, home: paths.home, id, platform }) }));
+  const scripts = names.map(event => ({ event, content: hookScript({ event, source: entry.source, launcher, home: paths.home, id, platform, launch }) }));
   for (const { event, content } of scripts) {
     const file = path.join(entry.hookDir, event);
     const fileState = await lstat(file).catch(error => {
@@ -320,6 +333,7 @@ export async function install({ config, agents = 'auto', repo = false, cwd = pro
     entry.files[event] = hash(content);
   }
   entry.preparationVersion = 1;
+  if (launch) entry.launch = launch;
   manifest.installs[id] = entry;
   await writeJson(paths.install, manifest);
   await git(['config', info.scope, '--replace-all', 'core.hooksPath', entry.hookDir], cwd, env);
@@ -342,7 +356,7 @@ export async function install({ config, agents = 'auto', repo = false, cwd = pro
       if (!same(await readJson(file, {}), plan.originalDocument)) throw new Error(`Settings changed during installation: ${file}. Retry installation.`);
       await writeJson(file, document);
     } catch (error) { await rollbackMcp(mcp); throw error; }
-    manifest.agents[name] = { file, handler, hooks, existed, emptyEvents, mcp: mcp.record };
+    manifest.agents[name] = { file, handler, hooks, existed, emptyEvents, mcp: mcp.record, ...(launch ? { launch } : {}) };
     await writeJson(paths.install, manifest);
     messages.push(`${name === 'codex' ? 'Codex' : 'Claude Code'} native questionnaire hooks and Sphinx MCP server installed.`);
   }
@@ -485,13 +499,14 @@ export async function doctor({ env = process.env, cwd = process.cwd(), platform 
     const entry = Object.values(manifest.installs).find(item => item.hookDir === effective);
     checks.push({ name: 'Current repository', ok: !!entry, detail: entry ? `Sphinx active: ${effective}` : 'Not covered. A local, worktree, or conditional override may require sphinx install --repo.' });
     if (entry) {
+      const moved = await missingLaunchFile(entry.launch);
       for (const name of [...GATED, ...PREPARED]) {
         const file = path.join(entry.hookDir, name);
         const content = await readFile(file).catch(() => null);
         let runnable = false;
         try { await access(file, constants.X_OK); runnable = true; } catch {}
         const preparationCurrent = !PREPARED.has(name) || entry.preparationVersion === 1;
-        checks.push({ name: `${name} dispatcher`, ok: preparationCurrent && runnable && content !== null && hash(content) === entry.files[name], detail: preparationCurrent ? file : 'Background preparation hooks need updating. Run sphinx install.' });
+        checks.push({ name: `${name} dispatcher`, ok: !moved && preparationCurrent && runnable && content !== null && hash(content) === entry.files[name], detail: moved ? launchGone(moved, entry.id !== 'global') : preparationCurrent ? file : 'Background preparation hooks need updating. Run sphinx install.' });
       }
     }
   } catch { checks.push({ name: 'Current repository', ok: true, detail: 'Not inside a Git repository; global installation still applies to other repositories.' }); }
@@ -515,7 +530,8 @@ export async function doctor({ env = process.env, cwd = process.cwd(), platform 
         present = !!installed.hooks && installedHookSpecs(installed).every(spec => hasHook(document, spec));
       } catch {}
     }
-    checks.push({ name: `${name} integration`, ok: installed ? present : true, detail: present
+    const moved = installed && await missingLaunchFile(installed.launch);
+    checks.push({ name: `${name} integration`, ok: installed ? present && !moved : true, detail: moved ? launchGone(moved) : present
       ? `${installed.file}; native questionnaire hooks configured${name === 'codex' ? '; review/trust in /hooks is required and cannot be verified by Sphinx' : '; start a new session to load changes'}`
       : installed ? `Native questionnaire hooks are missing, legacy, or changed. Run sphinx install --agents ${name}.`
         : notSelected });
