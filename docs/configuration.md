@@ -12,6 +12,7 @@ This page is the reference for reviewer models, usage limits, repository policy,
 - [Background preparation](#background-preparation)
 - [GitHub commit status and pull requests](#github-commit-status-and-pull-requests)
 - [Browser or terminal](#browser-or-terminal)
+- [Questionnaire language](#questionnaire-language)
 
 ## Settings locations
 
@@ -27,6 +28,8 @@ This page is the reference for reviewer models, usage limits, repository policy,
 | Your question preferences for every repository | `~/.config/sphinx/context.md` |
 
 `SPHINX_HOME` relocates all machine-wide settings, credentials, and assessment state. `sphinx config` shows effective settings and paths. A complete global example using the paid Haiku preset is in [examples/config.json](../examples/config.json).
+
+`SPHINX_SYSTEM_LANGUAGE` (`en` or `ko`) overrides the system language that `sphinx install` uses when it creates a new configuration. Use it in automation and tests.
 
 Model routes, credentials, and usage limits are machine-wide only. A repository cannot redirect review to another provider, supply credentials, or raise your limits.
 
@@ -305,3 +308,23 @@ The workflow pins the Action to a Sphinx release tag (`parthh01/sphinx/action@v0
 | `browser` | Always the browser (on Linux and over SSH, open the printed local URL) |
 
 Inline questions need a terminal a person is looking at. When Git runs from a coding agent's shell there isn't one, so Sphinx opens a terminal window on a desktop instead, and falls back to the browser when it can't do either. `interface` is a personal setting; it can't be set in `.sphinxconfig` and doesn't change what a check asks.
+
+## Questionnaire language
+
+`language` in `config.json` sets the language of your questionnaires. It is a personal setting: a repository's `.sphinxconfig` can't set it, and it is not part of the check policy, so changing it never invalidates a prepared check, a pass, or a waiting Git operation.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `language` | `en` | `en` (English) or `ko` (Korean). Change it with the language chip on the questionnaire page, with `sphinx config --language`, or in the language question of `sphinx install` |
+
+**Changing it.** The language chip, next to the model and question-distance chips, switches the page in place and saves the setting right away. `sphinx config --language ko` (or `en`) prints `Questionnaires use Korean.` or `Questionnaires use English.`, and a plain `sphinx config` shows a `Questionnaire language` row. Guided `sphinx install` asks first: on a first setup, with no config file yet, your system language is preselected; otherwise your current setting is. `sphinx install --language ko` (or `en`) answers it up front, and `sphinx install --yes` saves your system language only when it creates a new configuration, keeping the saved one otherwise.
+
+**What it covers.** The text the AI writes for you (questions, feedback, Explain this, follow-up questions, and the reason no questions were needed) and the questionnaire screens: the browser page, the terminal questionnaire (`sphinx check`, and Git asking in its terminal), the terminal window Sphinx opens when Git runs from a coding agent's shell, the Codex and Claude Code fallback form, and Pi's dialogs. Question ids, file paths, code identifiers, quoted code, and Git terms such as push and commit stay as written, and grading treats a Korean answer the same as the same answer in English. The fallback form's action values `answer`, `learn`, `dispute` and `pause` stay as they are, and its text explains them.
+
+**Terminal questionnaire.** The continue step accepts `계속` and `중단` in either language, and the Korean-IME letters `ㅊ`, `ㅛ`, `ㄴ` and `ㅜ` for c, y, s and n. The skip confirmation also goes back on `아니요`, `아니오`, `아니`, `중단` or `ㅜ`. Slash commands such as `/hint` stay English.
+
+**What stays English.** Command output, such as `install`, `config`, `doctor`, `status`, `help`, `pending`, and `uninstall`; Git hook messages (the `Sphinx: …` lines); Sphinx's own fixed text in GitHub stamps and comments; Sphinx's sentences in `--json` output; and these docs.
+
+**On GitHub.** A posted stamp or comment always quotes each question, and the no-question reason, in the language it was written in, so Korean questions appear on the pull request. `github.answers` only decides whether your answers are added.
+
+**Limits.** Questions prepared in the background before you switch come out once in the earlier language. A review or grading that is already running when you switch finishes in the earlier language. Text already on screen is not translated. Sessions saved by an older Sphinx show Sphinx's built-in fallback sentences in English until they expire. The AI may occasionally write English anyway; that is not treated as an error.
