@@ -502,7 +502,9 @@ export async function doctor({ env = process.env, cwd = process.cwd(), platform 
   const checks = [];
   const global = manifest.installs.global;
   const globalValue = await git(['config', '--global', '--includes', '--path', '--get', 'core.hooksPath'], cwd, env, [0, 1]);
-  checks.push({ name: 'Global Git hooks', ok: !!global && globalValue === global.hookDir, detail: globalValue || 'Not installed' });
+  // Outside a repository there are no dispatcher rows, so this row is where a moved Windows file shows up.
+  const globalMoved = await missingLaunchFile(global?.launch);
+  checks.push({ name: 'Global Git hooks', ok: !!global && globalValue === global.hookDir && !globalMoved, detail: globalMoved ? launchGone(globalMoved, false) : globalValue || 'Not installed' });
   try {
     await git(['rev-parse', '--git-dir'], cwd, env);
     const effective = await git(['config', '--path', '--get', 'core.hooksPath'], cwd, env, [0, 1]);

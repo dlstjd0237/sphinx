@@ -1034,19 +1034,19 @@ test('on Windows doctor reports a Node or Sphinx CLI file that the hooks start a
   assert.deepEqual(await failing(f), []);
   // An update that moves the CLI, as every pnpm update does when it deletes the old version's folder.
   await rm(f.cliPath);
-  assert.deepEqual(await failing(f), [...dispatchers, 'claude integration'].map(name => ({ name, ...gone(f, 'sphinx install') })));
+  assert.deepEqual(await failing(f), ['Global Git hooks', ...dispatchers, 'claude integration'].map(name => ({ name, ...gone(f, 'sphinx install') })));
   // An entry written before this record existed is not checked.
   const manifest = await json(f.paths.install);
   delete manifest.installs.global.launch; delete manifest.agents.claude.launch;
   await writeFile(f.paths.install, JSON.stringify(manifest));
   assert.deepEqual(await failing(f), []);
 
-  // A repository's own install is repaired in that repository.
+  // A repository's own install is repaired in that repository. The global install starts the same file and is repaired on its own.
   const g = await fixture(t);
   await install({ ...g.options, platform: 'win32' });
   await install({ ...g.options, repo: true, platform: 'win32' });
   await rm(g.cliPath);
-  assert.deepEqual(await failing(g), dispatchers.map(name => ({ name, ...gone(g, 'sphinx install --repo') })));
+  assert.deepEqual(await failing(g), [{ name: 'Global Git hooks', ...gone(g, 'sphinx install') }, ...dispatchers.map(name => ({ name, ...gone(g, 'sphinx install --repo') }))]);
 
   // Elsewhere nothing is recorded, and the hook scripts stay as they were.
   for (const platform of ['linux', 'darwin']) {
@@ -1057,6 +1057,27 @@ test('on Windows doctor reports a Node or Sphinx CLI file that the hooks start a
     assert.equal('launch' in posix.agents.claude, false, platform);
     for (const event of ['pre-push', 'pre-commit']) assert.doesNotMatch(await readFile(path.join(h.paths.home, 'hooks', 'global', event), 'utf8'), /no longer exists/, platform);
   }
+});
+
+test('on Windows doctor run outside a repository also fails the global hooks when the file they start is gone', async t => {
+  const f = await fixture(t);
+  await install({ ...f.options, platform: 'win32' });
+  // A folder that is no repository: Git may not look for one above it.
+  const elsewhere = path.join(f.base, 'elsewhere');
+  await mkdir(elsewhere);
+  const outside = async () => (await doctor({ env: { ...f.env, GIT_CEILING_DIRECTORIES: f.base }, cwd: elsewhere, platform: 'win32' })).checks;
+  const failing = checks => checks.filter(check => !check.ok);
+  const intact = await outside();
+  assert.match(intact.find(check => check.name === 'Current repository').detail, /^Not inside a Git repository/);
+  assert.deepEqual(failing(intact), []);
+  await rm(f.cliPath);
+  // There are no dispatcher rows outside a repository, so this row is the one that says so.
+  assert.deepEqual(failing(await outside()), [{ name: 'Global Git hooks', ok: false, detail: `Sphinx's hooks start ${f.cliPath}, which no longer exists. Run sphinx install.` }]);
+  // The install it names records the CLI's new path.
+  const updated = path.join(f.base, 'updated sphinx cli.mjs');
+  await writeFile(updated, '');
+  await install({ ...f.options, cliPath: updated, platform: 'win32' });
+  assert.deepEqual(failing(await outside()), []);
 });
 
 test('on Windows a gated dispatcher whose Sphinx CLI is gone says what to run and blocks, instead of a stack trace', { skip: process.platform !== 'win32', timeout: 60000 }, async t => {
