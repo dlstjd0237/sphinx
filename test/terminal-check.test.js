@@ -4,10 +4,18 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { Writable } from 'node:stream';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { runTerminalCheck } from '../src/terminal-check.js';
 import { createTerminal } from '../src/terminal.js';
 import { openVisibleTerminal, prefersTerminal, runGitTerminalCheck } from '../src/git-interview.js';
 import { DEFAULT_CONFIG, policyHash, validateConfig, validateRepositoryConfig } from '../src/config.js';
+import { createSessionStore } from '../src/sessions.js';
+import { createPrompts } from '../src/prompts.js';
+import { activityText } from '../src/reviewer.js';
+import { MODEL_OUTPUT_ERRORS } from '../src/evaluator.js';
+import { join, localize, msg } from '../src/i18n.js';
 
 const question = (id, prompt, extra = {}) => ({ id, prompt, choices: [], ...extra });
 function harness({ answers, results, waitingGit = false, more = false, started, event = 'pre-push', width = 80, held = false }) {
@@ -242,6 +250,54 @@ test('a failed grade keeps the question open instead of ending the check; cancel
   const cancelled = Object.assign(new Error('cancelled'), { code: 'SPHINX_CANCELLED' });
   const stopping = { ...store, answer: async () => { throw cancelled; } };
   await assert.rejects(runTerminalCheck({ store: stopping, session: { id: 'x', questions: [failing.q1], route: {}, snapshot: { repoRoot: '/r', target: { ref: 'refs/heads/main' } } }, config: DEFAULT_CONFIG, ask: async () => 'An answer', terminal: createTerminal({ stream, env: { NO_COLOR: '1' }, width: 80 }), stream, env: { SPHINX_HOME: '/nonexistent' }, validate: async () => {}, choose: async () => 'pause' }), /cancelled/);
+});
+
+test('no screen output contains [object Object] or message references', async t => {
+  // The spinner redraws on an interval; a mocked one draws the progress line when the review reports it.
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const squash = text => text.replace(/\s+/gu, ' ');
+  for (const language of ['en', 'ko']) {
+    const home = await mkdtemp(path.join(tmpdir(), 'sphinx-terminal-refs-'));
+    t.after(() => rm(home, { recursive: true, force: true }));
+    const env = { SPHINX_HOME: home, SPHINX_USER_HOME: home };
+    const config = { ...structuredClone(DEFAULT_CONFIG), maxModelCalls: 10, language };
+    const snapshot = { id: 'c'.repeat(64), repoRoot: '/test/repo', event: 'pre-push', target: { ref: 'refs/heads/main' }, files: ['app.js'], stats: { additions: 5, deletions: 1, files: 1 } };
+    const q1 = question('q1', 'Can a retry duplicate the insert? Why?', { concept: 'idempotency', expectedAnswer: 'Yes.', rationale: 'No deduplication.', evidence: [{ path: 'app.js', reason: 'Unconditional insertion.' }] });
+    let reviews = 0;
+    const store = createSessionStore({ env, validate: async () => {},
+      generate: async (_s, _c, options) => {
+        await options.beforeCall();
+        options.onProgress(activityText('read_file', { path: 'app.js' }));
+        t.mock.timers.tick(90);
+        if (++reviews === 1) throw Object.assign(new Error('The reviewer did not retain changed-code evidence.'), { code: 'INSUFFICIENT_EVIDENCE' });
+        return { questions: [q1] };
+      },
+      // The grader's reply cannot be used: the sessions store explains that in its own words.
+      grade: async request => { await request.beforeCall(); throw Object.assign(new Error('Malformed grade.'), { code: MODEL_OUTPUT_ERRORS[0] }); },
+    });
+    await store.ensure(snapshot, config);
+    let output = '';
+    const stream = new Writable({ write(chunk, _e, done) { output += chunk; done(); } });
+    stream.isTTY = true;
+    const terminal = createTerminal({ stream, env: { NO_COLOR: '1' }, width: 80 });
+    const answers = ['1', 'It inserts again.', '/quit'];
+    const ask = async () => answers.shift();
+    // As sphinx check wires it: the recovery menu, the progress line, the usage line, and a grading failure.
+    const code = await runTerminalCheck({ store, session: await store.read(snapshot.id), config, ask, terminal, stream, env, validate: async () => {}, choose: createPrompts({ ask, ui: terminal, language }).choose });
+    assert.equal(code, 1);
+    assert.doesNotMatch(output, /\[object Object\]|"\$t"|\$join/u, language);
+    const usage = join([msg('common.usage.tokens', { n: '0' }), msg('common.usage.calls', { calls: 1, limit: 10 })], ' · ');
+    const expected = [
+      ...['common.recovery.reviewFailedTitle', 'common.recovery.chooseHow', 'common.recovery.retryWithin', 'common.recovery.pauseLabel', 'common.recovery.pauseDescription'].map(key => msg(key)),
+      msg('common.recovery.callsRemain', { remaining: 9, reserve: 1 }), msg('common.recovery.usedSoFar', { usage }),
+      join(['Reviewing', msg('common.progress.readingFile', { path: 'app.js' })], ' · '),
+      join(["That didn't go through", msg('common.grading.unusableAnswer')], ': '),
+    ].map(ref => localize(ref, language));
+    for (const text of expected) {
+      assert.ok(squash(output).includes(squash(text)), `${language}: ${text}\n${output}`);
+      if (language === 'ko') assert.match(text, /[가-힣]/u, text);
+    }
+  }
 });
 
 test('a saved ungraded answer is shown once and Enter sends it again without retyping', async () => {

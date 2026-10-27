@@ -8,6 +8,7 @@ import { selectRoute, evaluatorConfig, questionLimit } from './routing.js';
 import { generateAssessment, gradeAnswer, MODEL_OUTPUT_ERRORS, FLAGGED_FEEDBACK, EMPTY_FEEDBACK } from './evaluator.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { hasPreferences } from './repo-context.js';
+import { join, msg, t } from './i18n.js';
 
 const now = () => new Date().toISOString();
 export function sessionFile(id, env = process.env) {
@@ -64,6 +65,8 @@ function callLimit(session) {
 // without a candidate still needs synthesis plus audit, even with exact reads saved.
 const minimumReviewerCalls = session => session.reviewerCheckpoint?.pendingAssessment ? 1 : 2;
 const retryHint = session => `Run sphinx check --id ${session.id} --retry-review to explicitly authorize a fresh review allowance; prior usage will be retained.`;
+// A refusal the questionnaire shows: an English message for code and command output, and a ref the screens draw.
+const refused = key => Object.assign(new Error(t('en', key)), { ref: msg(key) });
 function withRecoveryMessage(error, message) {
   // Preserve only the transport's sanitized diagnostic metadata. A provider
   // payload or request must never leak through a nested cause in CLI output.
@@ -159,7 +162,7 @@ export function createSessionStore({ env = process.env, generate = generateAsses
     return withLock(id, env, async () => {
       signal?.throwIfAborted();
       const session = await read(id);
-      if (session.policy !== policyHash(config)) throw new Error('Sphinx settings changed. Start a fresh check.');
+      if (session.policy !== policyHash(config)) throw refused('common.session.settingsChanged');
       await validate(session.snapshot, config);
       signal?.throwIfAborted();
       await syncCallLimit(session, config);
@@ -372,11 +375,11 @@ export function createSessionStore({ env = process.env, generate = generateAsses
   const start = (id, config, options = {}) => prepare(id, config, { ...options, wait: true, interactive: true });
   async function answer(id, text, config, {dispute=false, learn=false, expectedQuestionId, signal, hold=false} = {}) {
     if (typeof text !== 'string' || !text.trim()) throw new Error('An answer is required.');
-    if (text.length > 8000) throw new Error('Please keep your answer below 8,000 characters.');
+    if (text.length > 8000) throw refused('common.answer.tooLong');
     return withLock(id,env,async () => {
       signal?.throwIfAborted();
       const session = await read(id);
-      if (session.policy !== policyHash(config)) throw new Error('Sphinx settings changed. Start a fresh check.');
+      if (session.policy !== policyHash(config)) throw refused('common.session.settingsChanged');
       await validate(session.snapshot,config);
       signal?.throwIfAborted();
       await syncCallLimit(session, config);
@@ -405,12 +408,14 @@ export function createSessionStore({ env = process.env, generate = generateAsses
       } catch (error) {
         if (signal?.aborted || error?.name === 'AbortError') throw error;
         // The same codes also reject inputs before any request (such as control characters in the answer), which a resend cannot fix.
+        // withRecoveryMessage builds a new error, so the ref for the questionnaire goes on afterwards.
         if (requested && MODEL_OUTPUT_ERRORS.includes(error?.code)) {
-          throw Object.assign(withRecoveryMessage(error, learn ? 'The grader\'s reply couldn\'t be used, so no explanation is shown. Asking again makes another model call.'
-            : 'The grader\'s reply couldn\'t be used, so this wasn\'t graded. Your text is saved; sending it again makes another model call.'), { detail: error.message });
+          const key = learn ? 'common.grading.unusableExplanation' : 'common.grading.unusableAnswer';
+          throw Object.assign(withRecoveryMessage(error, t('en', key)), { detail: error.message, ref: msg(key) });
         }
         if (learn) throw error;
-        throw withRecoveryMessage(error, `${error.message} Your ${dispute ? 'dispute reason' : 'answer'} was saved and is offered again when you resume this question.`);
+        const saved = dispute ? 'common.grading.disputeSaved' : 'common.grading.answerSaved';
+        throw Object.assign(withRecoveryMessage(error, `${error.message} ${t('en', saved)}`), { ref: join([error.ref ?? error.message, msg(saved)], ' ') });
       }
       signal?.throwIfAborted();
       if (!['correct','incorrect','ambiguous'].includes(result.verdict)) throw new Error('Evaluator returned an invalid verdict. The check remains pending.');
@@ -509,14 +514,14 @@ export function createSessionStore({ env = process.env, generate = generateAsses
   // Moves an unfinished check to another reviewer: a plan's preset model when
   // only a provider is given (rate-limit recovery), or the exact model picked.
   async function switchRoute(id, config, provider, { signal, model: picked } = {}) {
-    if (!['claude', 'codex', 'openrouter', 'openai'].includes(provider)) throw new Error('Unknown reviewer provider.');
-    if (picked === undefined && !['claude', 'codex'].includes(provider)) throw new Error('Only Claude Code or Codex can take over a check on your plan.');
+    if (!['claude', 'codex', 'openrouter', 'openai'].includes(provider)) throw refused('server.switchRoute.unknownProvider');
+    if (picked === undefined && !['claude', 'codex'].includes(provider)) throw refused('server.switchRoute.planOnly');
     // Background preparation may be holding the check: wait for it, as start() does.
     return withLock(id, env, async () => {
       signal?.throwIfAborted();
       const session = await read(id);
-      if (session.policy !== policyHash(config)) throw new Error('Sphinx settings changed. Start a fresh check.');
-      if (!['pending', 'active'].includes(session.status)) throw new Error('Only an unfinished check can switch models.');
+      if (session.policy !== policyHash(config)) throw refused('common.session.settingsChanged');
+      if (!['pending', 'active'].includes(session.status)) throw refused('server.switchRoute.unfinishedOnly');
       const preset = REVIEWER_PRESETS.find(item => item.id === `${provider}-economy`);
       const model = picked ?? preset?.models[session.route.tier]?.model ?? null;
       const at = now();

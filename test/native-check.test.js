@@ -11,6 +11,7 @@ import { createSessionStore } from '../src/sessions.js';
 import { queuePresentation, listPresentations } from '../src/presentations.js';
 import { runNativeCheckpoint } from '../src/native-check.js';
 import { checkpointTerminalStatus, claimCheckpointDialog, finishCheckpointDialog } from '../src/terminal-launch.js';
+import { localize, msg } from '../src/i18n.js';
 
 const exec = promisify(execFile);
 const q = {
@@ -81,6 +82,21 @@ test('native forms complete each concept while tool results contain only status 
   assert.doesNotMatch(JSON.stringify(result), /question|answer|feedback|HUMAN_RESPONSE_PRIVATE|FEEDBACK_PRIVATE|ANSWER_KEY_PRIVATE|RUBRIC_PRIVATE/i);
   assert.equal(await f.store.approved(f.snapshot, f.config), true);
   assert.equal((await f.run({ elicit: async () => assert.fail('A claimed request must not reopen') })).status, 'not-required');
+});
+
+test('no screen output contains [object Object] or message references', async t => {
+  for (const language of ['en', 'ko']) {
+    const f = await fixture(t);
+    // Language is a personal setting outside the policy, so the check stays valid.
+    await saveConfig({ ...f.config, language }, f.env);
+    const forms = [];
+    assert.equal((await f.run({ elicit: async form => { forms.push(form); return { action: 'decline' }; } })).status, 'pending');
+    assert.doesNotMatch(JSON.stringify(forms), /\[object Object\]|\\"\$t\\"|"\$t"|\$join/u, language);
+    // The usage line: tokens only, since no call cap is set.
+    const usage = localize(msg('common.usage.tokens', { n: '0' }), language);
+    assert.equal(forms[0].message.split('\n')[3], usage);
+    if (language === 'ko') assert.match(usage, /[가-힣]/u);
+  }
 });
 
 test('native forms ignore answer-bearing concept metadata even from an older public-state adapter', async t => {

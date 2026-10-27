@@ -2,15 +2,17 @@ import { parseRoute, questionLimit } from './routing.js';
 import { reviewerTurnLimit } from './reviewer-limits.js';
 import { REVIEWER_PRESETS, presetOptions } from './model-presets.js';
 import { DISTANCES } from './config.js';
-import { systemLanguage } from './i18n.js';
+import { localize, systemLanguage } from './i18n.js';
 
 export const routeText = route => `${route.provider}${route.model ? `:${route.model}` : ''}`;
 export const splitList = value => String(value).split(',').map(item => item.trim()).filter(Boolean);
 export const questionCapsText = level => ['small', 'medium', 'large'].map(tier => `${tier} ${questionLimit(level, tier)}`).join(', ');
 export const reviewCapsText = config => ['small', 'medium', 'large'].map(tier => `${tier} ${Math.min(config.agentMaxTurns ?? 8, reviewerTurnLimit(tier, config.agentMaxTurns ?? 8) + 2)}`).join(', ');
 
-export function createPrompts({ ask, ui, select }) {
-  async function choose({ title, description, choices, current, requireSelection = false }) {
+// language draws the message refs a menu may carry (the review recovery menu); its own words stay English for now.
+export function createPrompts({ ask, ui, select, language = 'en' }) {
+  async function choose(prompt) {
+    const { title, description, choices, current, requireSelection = false } = localize(prompt, language);
     ui.section(title); if (description) ui.paragraph(description);
     const selected = requireSelection ? -1 : Math.max(0, choices.findIndex(choice => choice.value === current));
     ui.blank();

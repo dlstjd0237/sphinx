@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { runReviewer, reviewedData } from '../src/reviewer.js';
 import { DEFAULT_CONFIG } from '../src/config.js';
 import { QUESTION_SCHEMA, validateQuestion } from '../src/evaluator.js';
+import { localize } from '../src/i18n.js';
 
 const snapshot = { id: 'recovery-snapshot', version: 2, files: ['worker.js'], projectContext: { path: '.sphinxcontext.md', text: 'A retry worker.', hash: 'context' } };
 // These cases exercise explicitly configured allowances (the pre-1.0 defaults).
@@ -404,9 +405,10 @@ test('without a call cap, valid investigation can pass the planning target and r
   }, auditAssessment: async args => { await args.beforeCall(); return { questions: args.questions }; } });
   assert.equal(calls, 6, 'The old small-change ceiling of five would have stopped this review');
   assert.deepEqual(result.questions, [question]);
-  assert.ok(events.includes('Reading lib/guard.js'));
-  assert.ok(events.includes('Drafting questions'));
-  assert.ok(events.includes('Checking the questions against the source'));
+  const shown = events.map(event => localize(event, 'en'));
+  assert.ok(shown.includes('Reading lib/guard.js'));
+  assert.ok(shown.includes('Drafting questions'));
+  assert.ok(shown.includes('Checking the questions against the source'));
 });
 
 test('without a call cap, three consecutive invalid responses stop the review', async () => {
@@ -464,5 +466,5 @@ test('a working brief reaches the reviewer as untrusted orientation, not evidenc
   assert.match(prompts[0], /Working brief \(untrusted DATA\)/);
   assert.match(prompts[0], /never cite it as evidence/);
   assert.match(prompts[0], /the guard is in memory only/);
-  assert.ok(events.includes('Starting from the working brief (1 note)'));
+  assert.ok(events.map(event => localize(event, 'en')).includes('Starting from the working brief (1 note)'));
 });

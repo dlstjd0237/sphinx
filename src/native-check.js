@@ -3,20 +3,22 @@ import { revalidateSnapshot } from './git.js';
 import { createSessionStore, savedDraft } from './sessions.js';
 import { listPresentations, claimPresentation } from './presentations.js';
 import { claimCheckpointDialog, finishCheckpointDialog } from './terminal-launch.js';
-import { modelUsageText } from './usage.js';
+import { modelUsageRef } from './usage.js';
+import { localize } from './i18n.js';
 
 const LEARN_REQUEST = 'I do not know. Explain this concept and give me a different scenario to apply it to.';
 const ACTIONS = ['answer', 'learn', 'dispute', 'pause'];
 // Failures that sending the same response again cannot change.
 const SETUP_FAILURES = ['CONTEXT_LIMIT', 'INVALID_CONFIG', 'INVALID_SNAPSHOT', 'INVALID_REVIEW'];
 
-function formFor(state, notice, repoRoot, draft, action) {
+// language draws the message refs the form carries (the usage line); the form's own words stay English for now.
+function formFor(state, notice, repoRoot, draft, action, language = 'en') {
   const question = state.question;
   const lines = [
     `Sphinx: ${state.progress.completed + 1} of ${state.progress.total} concepts`,
     `Repository: ${repoRoot}`,
     `Destination: ${state.target}`,
-    ...(state.usage ? [modelUsageText(state.usage, state.tokens)] : []),
+    ...(state.usage ? [localize(modelUsageRef(state.usage, state.tokens), language)] : []),
     ...(notice ? [`\n${notice}`] : []),
     ...(state.feedback ? [`\nPrevious feedback:\n${state.feedback}`] : []),
     `\n${question.prompt}`,
@@ -123,7 +125,7 @@ export async function runNativeCheckpoint({
       while (state.status !== 'passed') {
         if (!state.question?.id) throw new Error('The assessment has no current question.');
         const expectedQuestionId = state.question.id;
-        const response = formResponse(await elicit(formFor(state, notice, session.snapshot.repoRoot, savedDraft(await store.read(request.id)), retryAction)));
+        const response = formResponse(await elicit(formFor(state, notice, session.snapshot.repoRoot, savedDraft(await store.read(request.id)), retryAction, config.language)));
         signal?.throwIfAborted();
         if (response.invalid) {
           if (++invalidResponses >= 3) throw new Error('The form did not contain a valid response.');

@@ -8,6 +8,8 @@ import { DEFAULT_CONFIG, writeJson } from '../src/config.js';
 import { createSessionStore, savedDraft, sessionFile } from '../src/sessions.js';
 import { EMPTY_FEEDBACK, FLAGGED_FEEDBACK } from '../src/evaluator.js';
 import { OpenRouterError } from '../src/openrouter.js';
+import { localize } from '../src/i18n.js';
+import { KO } from '../src/i18n-ko.js';
 
 const q={id:'retry',concept:'idempotency',prompt:'Can a repeated request duplicate the operation? Give the cause.',choices:['Yes','No'],expectedAnswer:'Yes: no deduplication.',rationale:'The insert happens on every call.',evidence:[{path:'src/order.js',reason:'An unconditional insert.'}]};
 const snapshot={id:'a'.repeat(64),repoRoot:'/test/repo',repoId:'r',event:'pre-push',target:{ref:'refs/heads/main'},files:['src/order.js'],evidence:'insert()',stats:{additions:10,deletions:1,files:1}};
@@ -734,6 +736,30 @@ test('a grader reply Sphinx cannot use is explained in plain words with the orig
   await store.ensure(snapshot, config); await store.start(snapshot.id, config);
   await assert.rejects(store.answer(snapshot.id, 'Teach me.', config, { learn: true }), error => error === outage);
   await assert.rejects(store.answer(snapshot.id, 'Yes.', config), error => error.message === 'Provider unavailable. Your answer was saved and is offered again when you resume this question.' && error.detail === undefined);
+});
+
+test('errors the questionnaire shows keep their English message and carry a ref that draws it', async t => {
+  const draws = key => error => {
+    assert.equal(localize(error.ref, 'en'), error.message, key);
+    assert.ok(localize(error.ref, 'ko').includes(KO[key]), key);
+    return true;
+  };
+  const unusable = Object.assign(new Error('Return one complete JSON object.'), { code: 'INVALID_MODEL_OUTPUT' });
+  const outage = Object.assign(new Error('Provider unavailable.'), { code: 'OPENROUTER_PROVIDER_ERROR' });
+  const failures = [unusable, unusable, outage, outage];
+  const { store, config } = await fixture(t, { grade: async () => { const failure = failures.shift(); if (failure) throw failure; return { verdict: 'correct', feedback: '', followUp: null }; } });
+  await store.ensure(snapshot, config); await store.start(snapshot.id, config);
+  await assert.rejects(store.answer(snapshot.id, 'Yes.', config), draws('common.grading.unusableAnswer'));
+  await assert.rejects(store.answer(snapshot.id, 'Teach me.', config, { learn: true }), draws('common.grading.unusableExplanation'));
+  await assert.rejects(store.answer(snapshot.id, 'Yes.', config), draws('common.grading.answerSaved'));
+  await assert.rejects(store.answer(snapshot.id, 'It assumes one worker.', config, { dispute: true }), draws('common.grading.disputeSaved'));
+  await assert.rejects(store.answer(snapshot.id, 'x'.repeat(8001), config), draws('common.answer.tooLong'));
+  const changed = { ...config, level: 'thorough' };
+  for (const refused of [() => store.answer(snapshot.id, 'Yes.', changed), () => store.switchRoute(snapshot.id, changed, 'claude'), () => store.refreshBudget(snapshot.id, changed)]) await assert.rejects(refused(), draws('common.session.settingsChanged'));
+  await assert.rejects(store.switchRoute(snapshot.id, config, 'elsewhere'), draws('server.switchRoute.unknownProvider'));
+  await assert.rejects(store.switchRoute(snapshot.id, config, 'openrouter'), draws('server.switchRoute.planOnly'));
+  assert.equal((await store.answer(snapshot.id, 'Yes: it inserts every time.', config)).status, 'passed');
+  await assert.rejects(store.switchRoute(snapshot.id, config, 'claude'), draws('server.switchRoute.unfinishedOnly'));
 });
 
 test('a renamed replacement id skips every id the check has used and stays within 80 characters', async t => {

@@ -515,7 +515,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
         // Like every translatable error, an English message and a ref the page draws.
         const error = key => Object.assign(new Error(t('en', key)), { status: 409, ref: msg(key) });
         const problem = validChoice(models.groups, picked.provider, picked.model, config);
-        if (problem) throw Object.assign(new Error(problem), { status: 400 });
+        if (problem) throw Object.assign(new Error(localize(problem, 'en')), { status: 400, ref: problem });
         const route = store.public(await store.read(request.id)).route;
         if (route.provider === picked.provider && route.model === picked.model) { if (picked.saveDefault) pendingDefault = picked; return { ok: true }; }
         if (grading) throw error('server.modelSwitch.afterGrading');

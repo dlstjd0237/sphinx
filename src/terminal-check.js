@@ -4,6 +4,7 @@ import { prepareInteractiveCheck } from './check-recovery.js';
 import { savedDraft } from './sessions.js';
 import { VERSION } from './version.js';
 import { wrapText, stripAnsi } from './terminal.js';
+import { localize } from './i18n.js';
 
 // The terminal questionnaire: the same check as the browser page, laid out for
 // a terminal. Used by `sphinx check` and when Git asks inline in a headless
@@ -18,8 +19,8 @@ const count = n => Number(n || 0).toLocaleString('en-US');
 // A waiting Git operation in the same words as the browser page.
 const words = event => event === 'pre-commit' ? ['commit', 'Commit'] : ['push', 'Push'];
 
-/** One status line that redraws in place on a TTY, and prints once otherwise. */
-export function createSpinner(stream, style) {
+/** One status line that redraws in place on a TTY, and prints once otherwise. A label may be a message ref. */
+export function createSpinner(stream, style, language = 'en') {
   let timer = null, label = '', started = 0, index = 0;
   const width = () => Math.max(20, (stream.columns || 80) - 4);
   const draw = () => {
@@ -31,11 +32,11 @@ export function createSpinner(stream, style) {
   };
   return {
     start(text) {
-      this.stop(); label = plain(text); started = Date.now();
+      this.stop(); label = plain(localize(text, language)); started = Date.now();
       if (stream.isTTY) { draw(); timer = setInterval(draw, 90); timer.unref?.(); }
       else stream.write(`  ${label}…\n`);
     },
-    update(text) { label = plain(text); },
+    update(text) { label = plain(localize(text, language)); },
     stop() { if (timer) { clearInterval(timer); timer = null; stream.write('\r\x1b[2K'); } },
   };
 }
@@ -103,10 +104,13 @@ function commandsLine(terminal, { waitingGit }) {
  * With more checks to follow in the same push, a pass does not ask yet.
  */
 export async function runTerminalCheck({ store, session, config, ask, terminal: base, stream = process.stdout, signal, waitingGit = false, more = false, planProviders = [], validate, choose, skip, env = process.env }) {
+  // Notes, warnings, progress and errors may carry message refs from the shared modules; they are drawn in the
+  // questionnaire language as they are printed.
+  const language = config.language;
   // Lines keep their own indentation; the shared helpers would rewrap it away.
-  const terminal = { ...base, line: text => stream.write(`${text}\n`), note: text => stream.write(`${base.style.muted(`  ${text}`)}\n`), warning: text => stream.write(`  ${base.style.amber('!')} ${text}\n`) };
+  const terminal = { ...base, line: text => stream.write(`${text}\n`), note: text => stream.write(`${base.style.muted(`  ${localize(text, language)}`)}\n`), warning: text => stream.write(`  ${base.style.amber('!')} ${localize(text, language)}\n`) };
   const { style } = terminal;
-  const spinner = createSpinner(stream, style);
+  const spinner = createSpinner(stream, style, language);
   const repoRoot = session.snapshot.repoRoot, event = session.snapshot.event, [op, Op] = words(event);
   // While Git waits, quitting stops it; /quit stays as an alias of /stop.
   const stop = waitingGit ? '/stop' : '/quit';
@@ -126,7 +130,7 @@ export async function runTerminalCheck({ store, session, config, ask, terminal: 
       // A pass made while Git waits is saved held: only the Git gate releases it, after
       // continue, so a window that outlives the gate cannot let a retry through.
       start: () => withSpinner(session.held ? 'Loading your earlier pass' : session.questions?.length ? 'Loading prepared questions' : `Reviewing the change with ${routeText(session.route)}`, () => store.start(session.id, config, {
-        signal, hold: waitingGit, onProgress: text => spinner.update(`Reviewing · ${text}`),
+        signal, hold: waitingGit, onProgress: text => spinner.update(`Reviewing · ${localize(text, language)}`),
       })),
       inspect: async () => store.public(await store.read(session.id)),
       authorizeMore: () => store.retryReview(session.id, config, { signal }),
@@ -142,7 +146,7 @@ export async function runTerminalCheck({ store, session, config, ask, terminal: 
     return finish(terminal, { waitingGit, more, ask, event });
   }
   if (state.status === 'passed' && state.noQuestionReason) {
-    terminal.line(''); mark(terminal, style.green('✓'), `No questions needed: ${plain(state.noQuestionReason)}`);
+    terminal.line(''); mark(terminal, style.green('✓'), `No questions needed: ${plain(localize(state.noQuestionReason, language))}`);
     return finish(terminal, { waitingGit, more, ask, event });
   }
 
@@ -191,7 +195,7 @@ export async function runTerminalCheck({ store, session, config, ask, terminal: 
       // Like the browser: a failed grade leaves the same question open. Only cancelling ends the check.
       if (signal?.aborted || ['SPHINX_CANCELLED', 'EVALUATOR_CANCELLED'].includes(error?.code) || error?.name === 'AbortError') throw error;
       terminal.line('');
-      terminal.warning(`That didn't go through: ${plain(error.message)}`);
+      terminal.warning(`That didn't go through: ${plain(localize(error.ref ?? error.message, language))}`);
       terminal.note(`Your progress is kept. Try again, or ${stop} to stop here.`);
       state = previous;
       continue;

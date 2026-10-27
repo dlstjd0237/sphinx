@@ -24,7 +24,8 @@ import { askInstall, askPolicy, createPrompts, installLanguage, languageQuestion
 import { runGitGate } from './git-gate.js';
 import { loadProjectContext, contextWithDescription, contextWithPreferences, ensurePersonalContext, PROJECT_CONTEXT_TEMPLATE } from './repo-context.js';
 import { REVIEWER_PRESETS, presetOptions } from './model-presets.js';
-import { modelUsageText, modelLimitText, readUsage, summarizeUsage, printUsage, usageDir } from './usage.js';
+import { modelUsageRef, modelUsageText, modelLimitText, readUsage, summarizeUsage, printUsage, usageDir } from './usage.js';
+import { localize } from './i18n.js';
 import { toggleYolo, yoloStatus, recentOverrides, recordOverride } from './overrides.js';
 import { runTerminalCheck } from './terminal-check.js';
 
@@ -423,9 +424,10 @@ async function githubCheckCommand(values) {
   return 0;
 }
 
-function printSession(session, terminal = ui()) {
+// language draws the message refs this output carries; its own words stay English for now.
+function printSession(session, terminal = ui(), language = 'en') {
   if (session.feedback) {
-    terminal.section(session.verdict === 'incorrect' ? 'Review this concept' : session.verdict === 'ambiguous' ? 'Clarification needed' : 'Feedback'); terminal.paragraph(session.feedback);
+    terminal.section(session.verdict === 'incorrect' ? 'Review this concept' : session.verdict === 'ambiguous' ? 'Clarification needed' : 'Feedback'); terminal.paragraph(localize(session.feedback, language));
   }
   if (session.status === 'passed') {
     terminal.blank(); terminal.success('Understanding check complete.');
@@ -434,7 +436,7 @@ function printSession(session, terminal = ui()) {
       : 'Approval saved for this exact change and destination. A waiting push or commit goes through once you choose Continue in its questionnaire.');
     return;
   }
-  terminal.blank(); terminal.note(`${session.route.tier} change · ${routeText(session.route)} · ${modelUsageText(session.usage, session.tokens)}`);
+  terminal.blank(); terminal.note(`${session.route.tier} change · ${routeText(session.route)} · ${localize(modelUsageRef(session.usage, session.tokens), language)}`);
   if (!session.question) { terminal.paragraph('Assessment queued. Run sphinx check to begin.'); return; }
   terminal.section(`Question ${session.progress.completed + 1} of ${session.progress.total}`); terminal.paragraph(session.question.prompt);
   if (session.question.choices.length) { terminal.blank(); terminal.rows(session.question.choices.map((choice, index) => [`${index + 1}.`, choice])); }
@@ -474,7 +476,7 @@ async function checkCommand(values) {
     }
     return runTerminalCheck({
       store, session: await store.read(session.id), config, ask, terminal, signal, waitingGit, more,
-      choose: createPrompts({ ask, ui: terminal }).choose,
+      choose: createPrompts({ ask, ui: terminal, language: config.language }).choose,
       validate: () => validateCheckpoint(session.snapshot, config),
       planProviders: await planProviders().catch(() => []),
       // A skip lets the waiting Git operation through; it is logged like the browser's.
@@ -657,6 +659,6 @@ export async function main(argv) {
     if (existing.snapshot.repoRoot !== repo.root) throw new Error('This checkpoint belongs to a different repository.');
     const learn = command === 'explain', dispute = command === 'dispute';
     const result = await withProgress(learn ? 'Preparing an explanation' : dispute ? 'Reviewing the question' : 'Checking your reasoning', () => store.answer(id, learn ? 'I do not know. Explain this concept and give me a different scenario to apply it to.' : values.text, config, { learn, dispute }), { enabled: !values.json });
-    if (values.json) json(result); else printSession(result); return 0;
+    if (values.json) json(result); else printSession(result, ui(), config.language); return 0;
   }
 }

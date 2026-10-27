@@ -11,9 +11,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createBrowserInterview, notifyDesktop, openQuestionnaireBrowser, unattendedGit } from '../src/browser-interview.js';
 import { SESSION_ENV } from '../src/activation.js';
 import { createSessionStore, DOCUMENTATION_REASON } from '../src/sessions.js';
-import { DEFAULT_CONFIG } from '../src/config.js';
+import { DEFAULT_CONFIG, saveOpenRouterKey } from '../src/config.js';
 import { EMPTY_FEEDBACK, FLAGGED_FEEDBACK } from '../src/evaluator.js';
-import { EN } from '../src/i18n.js';
+import { EN, join, localize, msg } from '../src/i18n.js';
 import { KO } from '../src/i18n-ko.js';
 import { claimCheckpointDialog, checkpointTerminalStatus, finishCheckpointDialog } from '../src/terminal-launch.js';
 import { recentOverrides } from '../src/overrides.js';
@@ -1139,7 +1139,8 @@ test('a failed language save reports languageError and leaves the state error al
   assert.ok(body.languageError.startsWith(KO['server.language.saveFailed'].replace('{reason}', '')), body.languageError);
   assert.match(body.languageError, /config\.json/u, 'the original error follows');
   for (const state of [body, f.interview.state]) {
-    assert.equal(state.error, before.error, 'the question\'s own error stays');
+    // The same error, now drawn in the chosen language: the grader's text stays as it was, Sphinx's sentence is Korean.
+    assert.equal(state.error, `The grader is unavailable. ${KO['common.grading.answerSaved']}`, 'the question\'s own error stays');
     assert.equal(state.language, 'ko', 'this operation still uses the chosen language');
   }
   assert.equal(f.interview.state.languageError, undefined, 'the state never carries it');
@@ -1219,6 +1220,64 @@ test('in-flight grading keeps its language and the page stays consistent', async
   assert.equal((await f.waitFor('consent')).message, fill(KO['server.consent.questionPush'], 'lead', KO['server.result.passed']));
   await f.confirm(); assert.equal((await done).status, 'passed');
   assert.deepEqual(languages, ['en', 'ko'], 'a grade already running keeps the language it started with');
+});
+
+// The change view of the fixture's checkpoint (no recorded head) cannot load; its reason arrives by itself.
+const unavailableView = async f => {
+  for (let i = 0; i < 300 && f.interview.state.change?.status !== 'unavailable'; i++) await delay(10);
+  return f.interview.state;
+};
+
+test('no screen output contains [object Object] or message references', async t => {
+  for (const language of ['en', 'ko']) {
+    const f = await fixture(t, { generate: async (attempt, options) => { await options.beforeCall(); if (attempt === 1) throw Object.assign(new Error('Review did not retain evidence.'), { code: 'INSUFFICIENT_EVIDENCE' }); return { questions: [q] }; } });
+    f.config.language = language;
+    const done = f.present();
+    await f.waitFor('recovery');
+    const draw = ref => localize(ref, language);
+    const usage = join([msg('common.usage.tokens', { n: '0' }), msg('common.usage.calls', { calls: 1, limit: 20 })], ' · ');
+    for (const state of [await unavailableView(f), await (await fetch(`${f.interview.url}/state`)).json()]) {
+      drawnIn(state, language);
+      assert.equal(state.message, draw(msg('common.recovery.reviewFailedTitle')));
+      assert.deepEqual(state.error.split('\n'), [draw(msg('common.recovery.waitingGit')), 'Review did not retain evidence.', draw(msg('common.recovery.usedSoFar', { usage }))]);
+      assert.deepEqual(state.choices.map(choice => [choice.value, choice.label, choice.description]), [
+        ['retry', draw(msg('common.recovery.retryWithin')), draw(join([msg('common.recovery.callsRemain', { remaining: 19, reserve: 1 }), msg('common.recovery.keepRoute')], ' '))],
+        ['pause', draw(msg('common.recovery.pauseLabel')), draw(msg('common.recovery.pauseDescription'))],
+      ]);
+      assert.equal(state.change.reason, draw(msg('server.changeView.headNotImmutable')));
+      if (language === 'ko') for (const text of [state.message, state.error, state.change.reason, ...state.choices.flatMap(choice => [choice.label, choice.description])]) assert.match(text, /[가-힣]/u, text);
+    }
+    await f.post('pause'); assert.equal((await done).status, 'pending');
+  }
+});
+
+test('a Korean page gets its HTTP errors, the change view reason, and the model menu in Korean', async t => {
+  const f = await fixture(t, { plans: ['claude'] });
+  // With an OpenRouter key the menu lists paid models, switched off.
+  await saveOpenRouterKey('sk-or-test', f.env);
+  f.config.language = 'ko';
+  const done = f.present(), question = await f.waitFor('question');
+  const stale = await f.post('answer', { response: 'Yes.' }, { ...question, revision: 'stale-revision' });
+  assert.equal(stale.status, 409);
+  assert.deepEqual(await stale.json(), { error: KO['server.http.checkpointChanged'] });
+  // The reason the change view is unavailable: in the state, and in the reply to GET /change and /diff while it is not ready.
+  assert.equal((await unavailableView(f)).change.reason, KO['server.changeView.headNotImmutable']);
+  for (const route of ['change', 'diff']) {
+    const reply = await fetch(`${f.interview.url}/${route}?id=${f.snapshot.id}&path=app.js`);
+    assert.deepEqual([reply.status, await reply.json()], [200, { status: 'unavailable', reason: KO['server.changeView.headNotImmutable'] }], route);
+  }
+  // The model menu and what it refuses.
+  const groups = f.interview.state.models.groups;
+  assert.deepEqual(groups.map(group => [group.provider, group.billing]), [['claude', KO['model.billing.plan']], ['openrouter', KO['model.billing.apiKey']]]);
+  assert.deepEqual(groups[0].models.map(option => option.note), [KO['model.note.fastest'], KO['model.note.stronger']]);
+  const paid = groups[1].models.find(option => option.model === 'deepseek/deepseek-v3.2');
+  assert.deepEqual([paid.note, paid.disabled], [KO['model.note.paid'], KO['model.choice.paidOff']]);
+  assert.equal(groups[1].models.find(option => option.model === 'openrouter/free').label, KO['model.option.freeRouter']);
+  for (const [picked, key] of [[{ provider: 'claude', model: 'opus' }, 'model.choice.notListed'], [{ provider: 'openrouter', model: 'deepseek/deepseek-v3.2' }, 'model.choice.paidOff']]) {
+    const refused = await pickModel(f, picked);
+    assert.deepEqual([refused.status, await refused.json()], [400, { error: KO[key] }], key);
+  }
+  await f.post('pause'); assert.equal((await done).status, 'pending');
 });
 
 test('built-in fallback texts show in Korean on a Korean page', async t => {

@@ -8,7 +8,7 @@ import { KO } from '../src/i18n-ko.js';
 
 const SRC = fileURLToPath(new URL('../src/', import.meta.url));
 // A 받침-dependent particle right after a placeholder, also past a closing quote or bracket around it.
-const PARTICLE = /\}["'”’`)\]」』]*(?:이|가|을|를|은|는|과|와|으로|로|이나|나|이라|라|란|론)/u;
+const PARTICLE = /\}["'”’`)\]」』》〉]*(?:이|가|을|를|은|는|과|와|으로|로|이나|나|이라|라|란|론|랑|며|면|든|였)/u;
 // Text after a placeholder that only looks like a particle; removed before the particle check.
 const PARTICLE_EXCEPTIONS = ['}가지'];
 
@@ -48,7 +48,7 @@ test('page keys are all in the page catalog', () => {
 });
 
 test('Korean text puts no 받침-dependent particle right after a placeholder', () => {
-  for (const example of ['“{query}”를', '\'{x}\'로', '({x})이', '{x}란', '{x}론', '「{x}」은']) assert.match(example, PARTICLE, example);
+  for (const example of ['“{query}”를', '\'{x}\'로', '({x})이', '{x}란', '{x}론', '「{x}」은', '《{x}》은', '〈{x}〉를', '{x}랑', '{x}며', '{x}면', '{x}든', '{x}였다']) assert.match(example, PARTICLE, example);
   for (const fine of ['{n}가지', '{x}에서', '{x}의', '{x}.', ': {x}']) assert.doesNotMatch(PARTICLE_EXCEPTIONS.reduce((rest, allowed) => rest.replaceAll(allowed, ''), fine), PARTICLE, fine);
   for (const [key, value] of Object.entries(KO)) {
     for (const text of texts(key, value)) {

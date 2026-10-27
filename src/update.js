@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getPaths, readJson, writeJson } from './config.js';
 import { VERSION } from './version.js';
+import { msg } from './i18n.js';
 
 // The questionnaire shows the installed version and, when npm has a newer one,
 // offers a one-click update. The update waits until this Sphinx process exits,
@@ -39,7 +40,8 @@ export async function latestVersion({ env = process.env, fetchImpl = globalThis.
 /** How this copy was installed, and so how to update it. Linked checkouts update with git. */
 export async function updatePlan({ root = PACKAGE_ROOT } = {}) {
   const real = await realpath(root).catch(() => root);
-  if (!real.split(path.sep).includes('node_modules')) return { manager: null, note: 'This is a linked development copy. Update it with git pull.' };
+  // The questionnaire shows the note in its language: a message ref.
+  if (!real.split(path.sep).includes('node_modules')) return { manager: null, note: msg('server.update.linkedCopy') };
   if (/[\\/](?:\.pnpm|pnpm)[\\/]/.test(real)) return { manager: 'pnpm', command: ['pnpm', 'add', '-g', `${PACKAGE}@latest`] };
   if (/[\\/]\.bun[\\/]/.test(real)) return { manager: 'bun', command: ['bun', 'add', '-g', `${PACKAGE}@latest`] };
   return { manager: 'npm', command: ['npm', 'install', '-g', `${PACKAGE}@latest`] };
