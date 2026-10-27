@@ -7,6 +7,8 @@ import { EN, LANGUAGES, format, isRef, join, localize, lookup, msg, pageCatalog,
 import { KO } from '../src/i18n-ko.js';
 
 const SRC = fileURLToPath(new URL('../src/', import.meta.url));
+// A 받침-dependent particle right after a placeholder, also past a closing quote or bracket around it.
+const PARTICLE = /\}["'”’`)\]」』]*(?:이|가|을|를|은|는|과|와|으로|로|이나|나|이라|라|란|론)/u;
 // Text after a placeholder that only looks like a particle; removed before the particle check.
 const PARTICLE_EXCEPTIONS = ['}가지'];
 
@@ -46,10 +48,12 @@ test('page keys are all in the page catalog', () => {
 });
 
 test('Korean text puts no 받침-dependent particle right after a placeholder', () => {
+  for (const example of ['“{query}”를', '\'{x}\'로', '({x})이', '{x}란', '{x}론', '「{x}」은']) assert.match(example, PARTICLE, example);
+  for (const fine of ['{n}가지', '{x}에서', '{x}의', '{x}.', ': {x}']) assert.doesNotMatch(PARTICLE_EXCEPTIONS.reduce((rest, allowed) => rest.replaceAll(allowed, ''), fine), PARTICLE, fine);
   for (const [key, value] of Object.entries(KO)) {
     for (const text of texts(key, value)) {
       const checked = PARTICLE_EXCEPTIONS.reduce((rest, allowed) => rest.replaceAll(allowed, ''), text);
-      assert.doesNotMatch(checked, /\}(?:이|가|을|를|은|는|과|와|으로|로|이나|나|이라|라)/u, key);
+      assert.doesNotMatch(checked, PARTICLE, key);
     }
   }
 });
@@ -72,6 +76,10 @@ test('lookup falls back from Korean to English, and t falls back to the key with
   assert.equal(t('en', 'toString'), 'toString');
   assert.equal(t('en', 'common.language.en'), 'English');
   assert.equal(t('ko', 'common.language.ko', null), '한국어');
+  // A stored ref can carry $p: null; the text comes back with its placeholder as written.
+  assert.equal(t('en', 'server.language.saveFailed', null), EN['server.language.saveFailed']);
+  assert.equal(t('ko', 'server.language.saveFailed', null), KO['server.language.saveFailed']);
+  assert.match(t('ko', 'server.language.saveFailed', null), /\{reason\}/u);
 });
 
 test('msg and join build refs, and isRef accepts only their shapes', () => {
@@ -92,6 +100,10 @@ test('localize resolves nested refs and joins and leaves strings alone', () => {
   assert.deepEqual(input, before);
   assert.equal(localize(join([msg('common.language.en'), join(['a', msg('common.language.ko')], '+')], ' · '), 'ko'), 'English · a+한국어');
   for (const value of ['plain', 7, null]) assert.equal(localize(value, 'ko'), value);
+  // A ref inside $p is drawn before the text around it is filled.
+  const nested = localize(msg('server.language.saveFailed', { reason: msg('common.language.ko') }), 'ko');
+  assert.ok(nested.includes('한국어'), nested);
+  assert.doesNotMatch(nested, /\{reason\}|\[object Object\]/u);
 });
 
 test('systemLanguage follows SPHINX_SYSTEM_LANGUAGE, then the locale', () => {
