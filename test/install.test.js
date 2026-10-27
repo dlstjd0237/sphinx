@@ -919,6 +919,22 @@ test('macOS hooks put the reviewer CLI directories after the GUI PATH behind a p
   assert.deepEqual(await sphinxLauncher(cli, on, node, 'linux'), { env: `PATH='/opt/node/bin':"$PATH" `, command });
 });
 
+test('on Windows the Claude Code hook command spells a UNC path with forward slashes, which bash -c passes on intact', async () => {
+  const { agentHookCommand } = await import('../src/install.js');
+  const q = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+  // Claude Code runs the command with bash -c, and MSYS2 turns each pair of backslashes on that command line into one.
+  const windows = ({ home, execPath, cliPath }) => agentHookCommand({ name: 'claude', home, execPath, cliPath, launcher: { env: '', command: `${q(execPath)} ${q(cliPath)}` }, platform: 'win32' });
+  assert.equal(windows({ home: '\\\\server\\share\\sphinx home', execPath: '\\\\server\\share\\node\\node.exe', cliPath: "\\\\server\\share\\O'Neil\\bin\\sphinx.js" }),
+    "SPHINX_HOME='//server/share/sphinx home' '//server/share/node/node.exe' '//server/share/O'\\''Neil/bin/sphinx.js' hook agent claude");
+  // A drive path is spelled as before.
+  const drive = { home: 'C:\\Users\\x\\.config\\sphinx', execPath: 'C:\\Program Files\\nodejs\\node.exe', cliPath: 'D:\\tools\\sphinx\\bin\\sphinx.js' };
+  assert.equal(windows(drive), `SPHINX_HOME=${q(drive.home)} ${q(drive.execPath)} ${q(drive.cliPath)} hook agent claude`);
+  // Elsewhere the launcher's command is used as it always was, whatever the paths look like.
+  const launcher = { env: `PATH='/opt/node/bin':"$PATH" `, command: "'/usr/local/bin/sphinx'" };
+  assert.equal(agentHookCommand({ name: 'claude', home: '\\\\server\\x', execPath: '/opt/node/bin/node', cliPath: '/x/sphinx.js', launcher, platform: 'linux' }),
+    `SPHINX_HOME='\\\\server\\x' PATH='/opt/node/bin':"$PATH" '/usr/local/bin/sphinx' hook agent claude`);
+});
+
 test('an agent whose CLI is on PATH is still detected, and one that is not is left out', async t => {
   const f = await fixture(t);
   const bin = path.join(f.base, 'bin');

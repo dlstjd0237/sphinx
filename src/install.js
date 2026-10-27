@@ -241,6 +241,16 @@ export async function detectAgents({ env = process.env, platform = process.platf
   return detectedAgents({ paths, env, manifest });
 }
 
+// The shell command a coding agent's Sphinx hooks run. Claude Code on Windows runs it with bash -c, and MSYS2 halves every run
+// of backslashes on that command line, so `\\server\share` would arrive as `\server\share`; spelled `//server/share`, a UNC path
+// arrives intact. There the launcher is always node.exe and the CLI by path, so both are spelled that way too. Git hook scripts
+// are files, read as they are, and keep their spelling.
+export function agentHookCommand({ name, home, launcher, cliPath, execPath = process.execPath, platform = process.platform }) {
+  if (platform !== 'win32') return `SPHINX_HOME=${quote(home)} ${launcher.env}${launcher.command} hook agent ${name}`;
+  const bash = file => file.startsWith('\\\\') ? file.replaceAll('\\', '/') : file;
+  return `SPHINX_HOME=${quote(bash(home))} ${quote(bash(execPath))} ${quote(bash(cliPath))} hook agent ${name}`;
+}
+
 async function prepareAgents({ agents, paths, env, cliPath, launcher, manifest, platform = process.platform }) {
   // `auto` on native Windows detects no agent, but still refreshes a Claude Code integration the user opted into:
   // its hook command and MCP server embed the CLI path, which an update can move.
@@ -259,7 +269,7 @@ async function prepareAgents({ agents, paths, env, cliPath, launcher, manifest, 
     const file = path.join(paths[`${name}Home`], name === 'codex' ? 'hooks.json' : 'settings.json');
     const document = await readJson(file, {});
     if (document.hooks !== undefined && (!document.hooks || typeof document.hooks !== 'object' || Array.isArray(document.hooks))) throw new Error(`Invalid hooks object in ${file}`);
-    const command = `SPHINX_HOME=${quote(paths.home)} ${launcher.env}${launcher.command} hook agent ${name}`;
+    const command = agentHookCommand({ name, home: paths.home, launcher, cliPath, platform });
     const handler = { type: 'command', command, timeout: 10 };
     const hooks = nativeHookSpecs(name, handler, platform);
     for (const { event } of hooks) {
