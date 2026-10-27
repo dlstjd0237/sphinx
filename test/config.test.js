@@ -281,6 +281,16 @@ test('an aborted signal stops the rename retries with its AbortError after the f
   assert.equal(refusing.calls, 1);
 });
 
+test('an abort while a rename retry waits rejects with the abort reason, so Ctrl+C keeps its cancel message', async () => {
+  const controller = new AbortController();
+  const reason = Object.assign(new Error('Cancelled. No further changes were made.'), { code: 'SPHINX_CANCELLED', exitCode: 130 });
+  const refusing = flakyRename(Infinity);
+  // The abort comes once the first wait has begun.
+  const renameImpl = async (...args) => { if (!refusing.calls) setImmediate(() => controller.abort(reason)); return refusing(...args); };
+  await assert.rejects(renameWithRetry('from', 'to', { signal: controller.signal, platform: 'win32', renameImpl }), error => error === reason);
+  assert.equal(refusing.calls, 1);
+});
+
 test('rename retries give up after their attempts with the last error, and other errors are not retried', async () => {
   const stuck = flakyRename(Infinity, 'EBUSY');
   await assert.rejects(renameWithRetry('from', 'to', { platform: 'win32', attempts: 3, renameImpl: stuck }), { code: 'EBUSY' });

@@ -91,7 +91,8 @@ export async function renameWithRetry(from, to, { signal, platform = process.pla
     try { await renameImpl(from, to); return; } catch (error) {
       if (platform !== 'win32' || !RENAME_BUSY.has(error?.code) || attempt >= attempts) throw error;
       signal?.throwIfAborted();
-      await sleep(attempt * 10, undefined, { signal });
+      // An abort during the wait rejects with the signal's reason, as throwIfAborted does, not the timer's generic AbortError.
+      await sleep(attempt * 10, undefined, { signal }).catch(error => { signal?.throwIfAborted(); throw error; });
     }
   }
 }
