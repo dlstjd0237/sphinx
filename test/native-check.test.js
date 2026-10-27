@@ -12,6 +12,8 @@ import { queuePresentation, listPresentations } from '../src/presentations.js';
 import { runNativeCheckpoint } from '../src/native-check.js';
 import { checkpointTerminalStatus, claimCheckpointDialog, finishCheckpointDialog } from '../src/terminal-launch.js';
 import { localize, msg } from '../src/i18n.js';
+import { validateFormSchema } from '../src/mcp.js';
+import { FLAGGED_FEEDBACK } from '../src/evaluator.js';
 
 const exec = promisify(execFile);
 const q = {
@@ -97,6 +99,48 @@ test('no screen output contains [object Object] or message references', async t 
     assert.equal(forms[0].message.split('\n')[3], usage);
     if (language === 'ko') assert.match(usage, /[가-힣]/u);
   }
+});
+
+test('a Korean form shows Korean text and keeps the action values', async t => {
+  // An unusable explanation, then an unusable answer whose draft is kept, then a flagged question.
+  const f = await fixture(t, { grade: async (_request, count) => {
+    if (count < 3) throw Object.assign(new Error('PRIVATE_GRADER_REJECTION'), { code: 'INVALID_MODEL_OUTPUT' });
+    return { verdict: 'ambiguous', feedback: FLAGGED_FEEDBACK, followUp: null };
+  } });
+  await saveConfig({ ...f.config, language: 'ko' }, f.env);
+  const forms = [], submit = f.store.answer;
+  const replies = [answer('   '), { action: 'accept', content: { action: 'learn' } }, answer('Yes, both attempts insert.'), answer('Yes, both attempts insert.'), answer('No.')];
+  // The fifth response finds the assessment busy, so the store saves nothing.
+  f.store.answer = async (...args) => {
+    if (forms.length === 5) throw Object.assign(new Error('This assessment is already running.'), { code: 'SPHINX_SESSION_BUSY' });
+    return submit(...args);
+  };
+  assert.equal((await f.run({ elicit: async form => { forms.push(form); return replies.shift() ?? { action: 'decline' }; } })).status, 'pending');
+  const ko = (key, params) => localize(msg(key, params), 'ko');
+  const feedback = `${ko('form.body.previousFeedback')}\n${ko('common.fallback.flagged')}`;
+  const message = (...notes) => [
+    ko('form.header.progress', { n: 1, total: 1 }), ko('form.header.repository', { path: f.snapshot.repoRoot }),
+    ko('form.header.destination', { target: f.snapshot.target.ref }), ko('common.usage.tokens', { n: '0' }),
+    ...notes.map(note => `\n${note}`), `\n${q.prompt}`, `\n${ko('form.body.options')}\n- Yes\n- No`, `\n${ko('form.body.instructions')}`,
+  ].join('\n');
+  assert.deepEqual(forms.map(form => form.message), [
+    message(), message(ko('form.notice.invalidResponse')), message(ko('form.notice.explanationFailed')),
+    message(ko('form.notice.draftKept')), message(feedback), message(ko('form.notice.notSaved'), feedback),
+  ]);
+  // Only the model's question and options stay English.
+  assert.doesNotMatch(forms.map(form => form.message).join('\n'), /Repository|Destination|concepts|feedback|Options|Answer with|nothing was marked|No answer|answer key/u);
+  // Hosts show the action values as they are, so the Korean instructions name each one.
+  for (const value of ['answer', 'learn', 'dispute', 'pause']) assert.ok(ko('form.body.instructions').includes(value), value);
+  for (const form of forms) {
+    const { action, response } = form.requestedSchema.properties;
+    assert.deepEqual(action.enum, ['answer', 'learn', 'dispute', 'pause']);
+    assert.deepEqual([action.title, response.title, response.description], [ko('form.schema.actionTitle'), ko('form.schema.responseTitle'), ko('form.schema.responseDescription')]);
+    for (const text of [action.title, response.title, response.description]) assert.match(text, /[가-힣]/u);
+    // An MCP host takes the Korean titles and description as they are.
+    assert.deepEqual(validateFormSchema(form.requestedSchema), form.requestedSchema);
+    assert.equal(form.language, 'ko');
+  }
+  assert.doesNotMatch(JSON.stringify(forms), /\[object Object\]|\$t|\$join/u);
 });
 
 test('native forms ignore answer-bearing concept metadata even from an older public-state adapter', async t => {

@@ -1,40 +1,42 @@
 import { loadConfig, policyHash } from './config.js';
 import { revalidateSnapshot } from './git.js';
-import { createSessionStore, savedDraft } from './sessions.js';
+import { createSessionStore, fallbackText, savedDraft } from './sessions.js';
 import { listPresentations, claimPresentation } from './presentations.js';
 import { claimCheckpointDialog, finishCheckpointDialog } from './terminal-launch.js';
 import { modelUsageRef } from './usage.js';
-import { localize } from './i18n.js';
+import { localize, msg, t } from './i18n.js';
 
 const LEARN_REQUEST = 'I do not know. Explain this concept and give me a different scenario to apply it to.';
 const ACTIONS = ['answer', 'learn', 'dispute', 'pause'];
 // Failures that sending the same response again cannot change.
 const SETUP_FAILURES = ['CONTEXT_LIMIT', 'INVALID_CONFIG', 'INVALID_SNAPSHOT', 'INVALID_REVIEW'];
 
-// language draws the message refs the form carries (the usage line); the form's own words stay English for now.
+// Draws Sphinx's words, the notice ref and Sphinx's own feedback sentences in the questionnaire language; the action
+// values stay English. The form carries language for Pi's labels; MCP sends only message and requestedSchema.
 function formFor(state, notice, repoRoot, draft, action, language = 'en') {
   const question = state.question;
   const lines = [
-    `Sphinx: ${state.progress.completed + 1} of ${state.progress.total} concepts`,
-    `Repository: ${repoRoot}`,
-    `Destination: ${state.target}`,
+    t(language, 'form.header.progress', { n: state.progress.completed + 1, total: state.progress.total }),
+    t(language, 'form.header.repository', { path: repoRoot }),
+    t(language, 'form.header.destination', { target: state.target }),
     ...(state.usage ? [localize(modelUsageRef(state.usage, state.tokens), language)] : []),
-    ...(notice ? [`\n${notice}`] : []),
-    ...(state.feedback ? [`\nPrevious feedback:\n${state.feedback}`] : []),
+    ...(notice ? [`\n${localize(notice, language)}`] : []),
+    ...(state.feedback ? [`\n${t(language, 'form.body.previousFeedback')}\n${localize(fallbackText(state.feedbackCode, state.feedback), language)}`] : []),
     `\n${question.prompt}`,
-    ...(question.choices?.length ? [`\nOptions:\n${question.choices.map(choice => `- ${choice}`).join('\n')}`] : []),
-    '\nAnswer with a prediction and a short reason. Choose learn for an explanation and a new scenario, dispute to challenge the question, or pause to stop without approval.',
+    ...(question.choices?.length ? [`\n${t(language, 'form.body.options')}\n${question.choices.map(choice => `- ${choice}`).join('\n')}`] : []),
+    `\n${t(language, 'form.body.instructions')}`,
   ];
   return {
     message: lines.join('\n'),
     requestedSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', title: 'Action', enum: ACTIONS, default: action ?? draft?.kind ?? 'answer' },
-        response: { type: 'string', title: 'Your answer or dispute reason', description: 'Required for answer and dispute. Leave blank for learn or pause.', maxLength: 8000, ...(draft ? { default: draft.text } : {}) },
+        action: { type: 'string', title: t(language, 'form.schema.actionTitle'), enum: ACTIONS, default: action ?? draft?.kind ?? 'answer' },
+        response: { type: 'string', title: t(language, 'form.schema.responseTitle'), description: t(language, 'form.schema.responseDescription'), maxLength: 8000, ...(draft ? { default: draft.text } : {}) },
       },
       required: ['action'],
     },
+    language,
   };
 }
 
@@ -129,7 +131,7 @@ export async function runNativeCheckpoint({
         signal?.throwIfAborted();
         if (response.invalid) {
           if (++invalidResponses >= 3) throw new Error('The form did not contain a valid response.');
-          notice = 'Choose an action and enter an answer or dispute reason, up to 8,000 characters. No answer was submitted.';
+          notice = msg('form.notice.invalidResponse');
           continue;
         }
         notice = retryAction = undefined;
@@ -158,10 +160,8 @@ export async function runNativeCheckpoint({
           if (state.usage.limit !== null && state.usage.calls >= state.usage.limit) throw error;
           // Promise a kept draft only when the store saved this response; an explanation request saves none.
           const draft = savedDraft(saved);
-          if (response.action === 'learn') { notice = 'The explanation was not shown, and nothing was marked complete. Choose learn to ask again, or choose pause.'; retryAction = 'learn'; }
-          else notice = draft?.kind === response.action && draft.text === response.response
-            ? 'That response was not graded, and nothing was marked complete. Your draft is kept: send it again, or choose pause.'
-            : 'That response was not graded or saved, and nothing was marked complete. Enter it again, or choose pause.';
+          if (response.action === 'learn') { notice = msg('form.notice.explanationFailed'); retryAction = 'learn'; }
+          else notice = msg(draft?.kind === response.action && draft.text === response.response ? 'form.notice.draftKept' : 'form.notice.notSaved');
           continue;
         }
         gradingFailures = 0;
