@@ -147,7 +147,7 @@ These are for a person or a test harness. A coding agent must not answer on your
 | Symptom | What to do |
 | --- | --- |
 | Git is waiting and no page opened | Open the `Sphinx questionnaire:` URL that Git printed. A GUI client does not show it while Git waits. There the push stops by itself, with your progress saved: after 3 minutes with no page open if Sphinx could hand the page to the system, otherwise at the 25-minute deadline. Then push again, or push from a terminal, which shows the URL while Git waits. |
-| You closed the tab | From a terminal or a coding agent, Git keeps waiting: reopen the same URL until the 25-minute deadline. From a GUI client, or on Windows with neither a terminal nor a coding agent, Git stops 3 minutes after every Sphinx tab is closed; push again. |
+| You closed the tab | From a terminal or a coding agent, Git keeps waiting: reopen the same URL until the 25-minute deadline. From a GUI client, or on Windows with neither a terminal nor a coding agent, Git stops 3 minutes after every Sphinx tab is closed; push again. Git Bash's default MinTTY window counts as no terminal, so the stop applies there (see **Windows** under GUI Git clients). |
 | You chose Stop push (or Pause check), the deadline passed, or the host cancelled the shell | Progress is saved. Run the Git command once more, or `sphinx check` first. |
 | You passed and chose Stop push, or Git stopped waiting before you chose | The push or commit did not go through. Your pass is saved, so running the same Git command again asks only whether to continue, with no new questions. |
 | A native form was cancelled or never appeared | Run `sphinx check` in a terminal. In Codex, see the approval policy note above. |

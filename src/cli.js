@@ -202,10 +202,12 @@ export function agentSummary(agents, platform = process.platform) {
 }
 
 // What `sphinx config --interface` says about where questions appear. Native Windows has no inline terminal check and no
-// terminal window, so there `terminal` falls back to the browser too.
+// terminal window, so there `terminal` and `auto` mean the browser, opened for you or, over SSH, at the address Git prints.
 export function interfaceSummary(value, platform = process.platform) {
-  const terminal = platform === 'win32' ? 'in the browser: native Windows has no inline terminal check' : 'in the terminal (the browser is the fallback)';
-  return `Questions appear ${value === 'terminal' ? terminal : value === 'browser' ? 'in the browser' : 'in the browser on a local Mac or Windows, otherwise in the terminal'}.`;
+  const windows = platform === 'win32';
+  const terminal = windows ? 'in the browser: native Windows has no inline terminal check' : 'in the terminal (the browser is the fallback)';
+  const auto = windows ? `${terminal}. The page opens by itself, and over SSH Git prints its address instead` : 'in the browser on a local Mac or Windows, otherwise in the terminal';
+  return `Questions appear ${value === 'terminal' ? terminal : value === 'browser' ? 'in the browser' : auto}.`;
 }
 
 // What to tell the user once clients were not opened: a command to run, or a note on native Windows, where Sphinx never opens clients.

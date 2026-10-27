@@ -300,7 +300,7 @@ The workflow pins the Action to a Sphinx release tag (`parthh01/sphinx/action@v0
 
 | Value | Behavior |
 | --- | --- |
-| `auto` (default) | The browser on a local Mac or on Windows, where Sphinx opens it for you: in front on Windows and for GUI Git clients on macOS, in the background for macOS terminals and coding agents. Elsewhere (SSH, Linux, WSL), inline in the terminal you ran Git from |
+| `auto` (default) | The browser on a local Mac or on Windows, where Sphinx opens it for you: in front on Windows and for GUI Git clients on macOS, in the background for macOS terminals and coding agents. Elsewhere (SSH, Linux, WSL), inline in the terminal you ran Git from. Native Windows over SSH is the exception: it has no inline terminal check, so Git prints the page's address instead |
 | `terminal` | Always the terminal. Native Windows has no inline terminal check, so it uses the browser: the page opens by itself, and over SSH Git prints its address instead |
 | `browser` | Always the browser (on Linux and over SSH, open the printed local URL) |
 

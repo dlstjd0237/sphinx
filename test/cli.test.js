@@ -12,6 +12,9 @@ import { getPaths } from '../src/config.js';
 
 const CLI = fileURLToPath(new URL('../bin/sphinx.js', import.meta.url));
 const WINDOWS_NOTE = 'Sphinx does not open clients on Windows. Start a new Claude Code session in this repository to load Sphinx.';
+const AUTO_SUMMARY = 'Questions appear in the browser on a local Mac or Windows, otherwise in the terminal.';
+// Native Windows has no inline terminal check, so even `auto` over SSH shows no questions in the terminal.
+const WINDOWS_AUTO_SUMMARY = 'Questions appear in the browser: native Windows has no inline terminal check. The page opens by itself, and over SSH Git prints its address instead.';
 const squash = text => text.replace(/\s+/g, ' ');
 
 // A subprocess fixture exercising the real provider transport and output validation.
@@ -358,7 +361,7 @@ test('help says the questionnaire opens by itself on macOS and Windows, and that
   for (const command of ['activate', 'mcp']) assert.ok(help(command).includes(WINDOWS_NOTE), `${command} help should carry the Windows exception`);
   assert.ok(help('config').includes('auto (default): the browser on a local Mac or on Windows, otherwise inline in the terminal you ran Git from.'));
   assert.ok(squash(f.cli('--help')).includes(`Open fresh coding-agent sessions with Sphinx. ${WINDOWS_NOTE}`));
-  assert.match(squash(f.cli('config', '--interface', 'auto')), /Questions appear in the browser on a local Mac or Windows, otherwise in the terminal\./);
+  assert.ok(squash(f.cli('config', '--interface', 'auto')).includes(process.platform === 'win32' ? WINDOWS_AUTO_SUMMARY : AUTO_SUMMARY));
 });
 
 test('scripted installation defers client launch and activate checks configured selections', async t => {
@@ -417,14 +420,14 @@ test('the agent summary row and the activation advice say what native Windows do
   assert.deepEqual(activationAdvice(['codex', 'claude'], 'darwin'), { command: 'sphinx activate --agents codex,claude' });
 });
 
-test('the interface setting says where questions appear, and terminal means the browser on native Windows', () => {
+test('the interface setting says where questions appear, and on native Windows terminal and auto mean the browser', () => {
   for (const platform of ['linux', 'darwin']) assert.equal(interfaceSummary('terminal', platform), 'Questions appear in the terminal (the browser is the fallback).', platform);
   // Windows has no inline terminal check and no terminal window, so the check falls back to the browser.
   assert.equal(interfaceSummary('terminal', 'win32'), 'Questions appear in the browser: native Windows has no inline terminal check.');
-  for (const platform of ['win32', 'linux']) {
-    assert.equal(interfaceSummary('browser', platform), 'Questions appear in the browser.', platform);
-    assert.equal(interfaceSummary('auto', platform), 'Questions appear in the browser on a local Mac or Windows, otherwise in the terminal.', platform);
-  }
+  for (const platform of ['win32', 'linux']) assert.equal(interfaceSummary('browser', platform), 'Questions appear in the browser.', platform);
+  // `auto` says "otherwise in the terminal" elsewhere, which is not true of native Windows over SSH: Git prints the page's address.
+  for (const platform of ['linux', 'darwin']) assert.equal(interfaceSummary('auto', platform), AUTO_SUMMARY, platform);
+  assert.equal(interfaceSummary('auto', 'win32'), WINDOWS_AUTO_SUMMARY);
 });
 
 test('on Windows an unsupported agent is rejected before any OpenRouter key is saved', { skip: process.platform !== 'win32' }, async t => {
