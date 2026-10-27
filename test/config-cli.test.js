@@ -333,7 +333,11 @@ test('sphinx config --language fr fails and saves nothing', async t => {
 
 test('flagless sphinx config shows the questionnaire language', async t => {
   const f = await fixture(t);
-  assert.match(plain(f.ok(['config'])), /Questionnaire language English/);
+  f.env.COLUMNS = '80';
+  const output = f.ok(['config']);
+  assert.match(plain(output), /Questionnaire language English/);
+  // A row of its own: the Global settings row keeps its label column as it was before the language row.
+  assert.match(output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, ''), /^ {2}Global settings {3}\S/mu);
   f.ok(['config', '--language', 'ko']);
   assert.match(plain(f.ok(['config'])), /Questionnaire language Korean/);
 });

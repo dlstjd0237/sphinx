@@ -308,7 +308,8 @@ async function installCommand(initial) {
   const preselected = installLanguage({ hasExistingConfig, current });
   const values = initial.yes ? { ...initial, language: initial.language ?? preselected } : await withReadline(async ask => {
     const prompts = createPrompts({ ask, ui: terminal, select: process.stdin.isTTY && process.stdout.isTTY && process.env.TERM !== 'dumb' ? ask.checkbox : undefined });
-    return askInstall(current, { ...initial, language: initial.language ?? await prompts.choose(languageQuestion(preselected)) }, prompts, { detectedAgents: detected, hasExistingConfig, installedPlans });
+    const language = initial.language ?? await prompts.choose(languageQuestion(preselected));
+    return askInstall(current, { ...initial, language }, prompts, { detectedAgents: detected, hasExistingConfig, installedPlans });
   });
   const config = applyInstallOptions(current, values);
   terminal.section('Machine-wide defaults');
@@ -626,7 +627,8 @@ export async function main(argv) {
     }
     const repo = await git.repository(process.cwd()).catch(() => null), config = await loadConfig(repo?.root);
     if (values.json) { json(config); return 0; }
-    const terminal = ui(); terminal.section('Effective configuration'); terminal.rows([['Global settings', getPaths().config], ['Questionnaire language', config.language === 'ko' ? 'Korean' : 'English']]);
+    const terminal = ui(); terminal.section('Effective configuration'); terminal.rows([['Global settings', getPaths().config]]);
+    terminal.rows([['Questionnaire language', config.language === 'ko' ? 'Korean' : 'English']]);
     if (repo) {
       const info = await repositoryConfigInfo(repo.root);
       terminal.rows([['Repository policy', info.exists ? `${info.path}${info.legacy ? ' (legacy)' : ''}` : 'None; global policy applies']]);
