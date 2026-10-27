@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
-import { activationAdvice, agentSummary, guidedInstallError } from '../src/cli.js';
+import { activationAdvice, agentSummary, guidedInstallError, interfaceSummary } from '../src/cli.js';
 import { getPaths } from '../src/config.js';
 
 const CLI = fileURLToPath(new URL('../bin/sphinx.js', import.meta.url));
@@ -415,6 +415,16 @@ test('the agent summary row and the activation advice say what native Windows do
   assert.deepEqual(activationAdvice(['claude'], 'win32'), { note: WINDOWS_NOTE });
   assert.deepEqual(activationAdvice(['claude'], 'linux'), { command: 'sphinx activate --agents claude' });
   assert.deepEqual(activationAdvice(['codex', 'claude'], 'darwin'), { command: 'sphinx activate --agents codex,claude' });
+});
+
+test('the interface setting says where questions appear, and terminal means the browser on native Windows', () => {
+  for (const platform of ['linux', 'darwin']) assert.equal(interfaceSummary('terminal', platform), 'Questions appear in the terminal (the browser is the fallback).', platform);
+  // Windows has no inline terminal check and no terminal window, so the check falls back to the browser.
+  assert.equal(interfaceSummary('terminal', 'win32'), 'Questions appear in the browser: native Windows has no inline terminal check.');
+  for (const platform of ['win32', 'linux']) {
+    assert.equal(interfaceSummary('browser', platform), 'Questions appear in the browser.', platform);
+    assert.equal(interfaceSummary('auto', platform), 'Questions appear in the browser on a local Mac or Windows, otherwise in the terminal.', platform);
+  }
 });
 
 test('on Windows an unsupported agent is rejected before any OpenRouter key is saved', { skip: process.platform !== 'win32' }, async t => {

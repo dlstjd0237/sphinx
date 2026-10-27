@@ -200,6 +200,13 @@ export function agentSummary(agents, platform = process.platform) {
   return agents || 'auto (detect installed agents)';
 }
 
+// What `sphinx config --interface` says about where questions appear. Native Windows has no inline terminal check and no
+// terminal window, so there `terminal` falls back to the browser too.
+export function interfaceSummary(value, platform = process.platform) {
+  const terminal = platform === 'win32' ? 'in the browser: native Windows has no inline terminal check' : 'in the terminal (the browser is the fallback)';
+  return `Questions appear ${value === 'terminal' ? terminal : value === 'browser' ? 'in the browser' : 'in the browser on a local Mac or Windows, otherwise in the terminal'}.`;
+}
+
 // What to tell the user once clients were not opened: a command to run, or a note on native Windows, where Sphinx never opens clients.
 export function activationAdvice(agents, platform = process.platform) {
   return platform === 'win32' ? { note: WINDOWS_ACTIVATION_NOTE } : { command: `sphinx activate --agents ${agents.join(',')}` };
@@ -593,7 +600,7 @@ export async function main(argv) {
       const result = { scope: 'global', path: getPaths().config, previousMaxModelCalls, maxModelCalls, config };
       if (values.json) { json(result); return 0; }
       const terminal = ui();
-      if (values.interface !== undefined) terminal.success(`Questions appear ${config.interface === 'terminal' ? 'in the terminal (the browser is the fallback)' : config.interface === 'browser' ? 'in the browser' : 'in the browser on a local Mac or Windows, otherwise in the terminal'}.`);
+      if (values.interface !== undefined) terminal.success(interfaceSummary(config.interface));
       if (values['max-model-calls'] !== undefined) terminal.success(`Saved machine-wide limit: ${modelLimitText(maxModelCalls)} (previously ${modelLimitText(previousMaxModelCalls)}).`);
       if (values['max-output-tokens'] !== undefined) terminal.success(`Saved output allowance: ${config.maxOutputTokens} tokens per request, including model reasoning. Model calls: ${modelLimitText(maxModelCalls)}.`);
       if (MODEL_FLAGS.some(key => !['max-model-calls', 'max-output-tokens'].includes(key) && values[key] !== undefined)) {

@@ -301,7 +301,7 @@ The workflow pins the Action to a Sphinx release tag (`parthh01/sphinx/action@v0
 | Value | Behavior |
 | --- | --- |
 | `auto` (default) | The browser on a local Mac or on Windows, where Sphinx opens it for you: in front on Windows and for GUI Git clients on macOS, in the background for macOS terminals and coding agents. Elsewhere (SSH, Linux, WSL), inline in the terminal you ran Git from |
-| `terminal` | Always the terminal. Native Windows has no inline terminal check, so it opens the browser |
+| `terminal` | Always the terminal. Native Windows has no inline terminal check, so it uses the browser: the page opens by itself, and over SSH Git prints its address instead |
 | `browser` | Always the browser (on Linux and over SSH, open the printed local URL) |
 
 Inline questions need a terminal a person is looking at. When Git runs from a coding agent's shell there isn't one, so Sphinx opens a terminal window on a desktop instead, and falls back to the browser when it can't do either. `interface` is a personal setting; it can't be set in `.sphinxconfig` and doesn't change what a check asks.
