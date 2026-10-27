@@ -410,6 +410,16 @@ test('on Windows a worker starts in the Sphinx home and is told its repository; 
   }
 });
 
+test('a SPHINX_PREPARATION_ROOT left in the shell never redirects a worker: off Windows it is dropped, on Windows replaced', async t => {
+  for (const platform of ['linux', 'win32']) {
+    const f = await fixture(t), { root } = await repository(f.cwd);
+    await schedulePreparation({ ...f.options, env: { ...f.env, SPHINX_PREPARATION_ROOT: '/elsewhere' }, platform });
+    const [, , launch] = f.launches[0];
+    assert.equal(Object.hasOwn(launch.env, 'SPHINX_PREPARATION_ROOT'), platform === 'win32', platform);
+    if (platform === 'win32') assert.equal(launch.env.SPHINX_PREPARATION_ROOT, root);
+  }
+});
+
 test('a worker started in the Sphinx home prepares the repository named by SPHINX_PREPARATION_ROOT, exactly as the push checkpoint will', async t => {
   const f = await fixture(t), { root } = await repository(f.cwd);
   const { jobId } = await schedulePreparation(f.options);

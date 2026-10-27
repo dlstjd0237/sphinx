@@ -190,9 +190,12 @@ export async function schedulePreparation({ cwd = process.cwd(), env = process.e
       // Windows refuses to rename or remove a folder that a running process uses as its working directory, and this
       // worker lives for minutes after a commit. So there it starts in the Sphinx home and is told its repository.
       const windows = platform === 'win32';
+      // Elsewhere the worker's folder is its repository, so a SPHINX_PREPARATION_ROOT left in the shell must not reach it.
+      const workerEnv = { ...env, SPHINX_PREPARATION_JOB: plan.id };
+      if (windows) workerEnv.SPHINX_PREPARATION_ROOT = plan.repo.root; else delete workerEnv.SPHINX_PREPARATION_ROOT;
       const child = spawnImpl(process.execPath, [cliPath, 'prepare', '--worker'], {
         cwd: windows ? getPaths(env).home : plan.repo.root,
-        env: { ...env, SPHINX_PREPARATION_JOB: plan.id, ...(windows ? { SPHINX_PREPARATION_ROOT: plan.repo.root } : {}) },
+        env: workerEnv,
         detached: true, stdio: 'ignore',
       });
       await new Promise((resolve, reject) => { child.once('error', reject); child.once('spawn', resolve); });
