@@ -11,6 +11,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createBrowserInterview, notifyDesktop, openQuestionnaireBrowser, unattendedGit } from '../src/browser-interview.js';
 import { SESSION_ENV } from '../src/activation.js';
 import { createSessionStore, DOCUMENTATION_REASON } from '../src/sessions.js';
+import { loadChangeView } from '../src/change-view.js';
 import { DEFAULT_CONFIG, saveOpenRouterKey } from '../src/config.js';
 import { EMPTY_FEEDBACK, FLAGGED_FEEDBACK } from '../src/evaluator.js';
 import { EN, join, localize, msg } from '../src/i18n.js';
@@ -1277,6 +1278,32 @@ test('a Korean page gets its HTTP errors, the change view reason, and the model 
     const refused = await pickModel(f, picked);
     assert.deepEqual([refused.status, await refused.json()], [400, { error: KO[key] }], key);
   }
+  await f.post('pause'); assert.equal((await done).status, 'pending');
+});
+
+test('the page is served in the chosen language', async t => {
+  const f = await fixture(t);
+  f.config.language = 'ko';
+  const done = f.present(); await f.waitFor('question');
+  const html = await (await fetch(f.interview.url)).text();
+  assert.match(html, /^<!doctype html>\n<html lang="ko">/u);
+  assert.ok(html.includes(`<title>${KO['page.title.default']}</title>`));
+  await f.post('pause'); assert.equal((await done).status, 'pending');
+});
+
+test('a file diff the change view refuses gets its reason in Korean on a Korean page', async t => {
+  // The real error class, from a checkpoint with no recorded files.
+  const ChangeViewError = (await loadChangeView({}, DEFAULT_CONFIG).catch(error => error)).constructor;
+  const header = { checkpoint: 'a'.repeat(64), repository: 'repo', event: 'pre-push', remote: 'origin', destination: 'refs/heads/main', base: null, head: 'b'.repeat(40), staged: false, excludedFiles: 0 };
+  const totals = { files: 0, additions: 0, deletions: 0, binaryFiles: 0, uncountedFiles: 0 };
+  const loadView = async () => ({ header, totals, summary: () => ({ header, totals, files: [], listed: 0 }), evidenceFor: async () => [],
+    diff: async () => { throw new ChangeViewError('server.changeView.fileNotInCheckpoint'); } });
+  const f = await fixture(t, { interviewOptions: { loadView } });
+  f.config.language = 'ko';
+  const done = f.present(); await f.waitFor('question');
+  for (let i = 0; i < 300 && f.interview.state.change?.status !== 'ready'; i++) await delay(10);
+  const reply = await fetch(`${f.interview.url}/diff?id=${f.snapshot.id}&path=elsewhere.js`);
+  assert.deepEqual([reply.status, await reply.json()], [404, { error: KO['server.changeView.fileNotInCheckpoint'] }]);
   await f.post('pause'); assert.equal((await done).status, 'pending');
 });
 

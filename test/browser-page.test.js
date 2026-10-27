@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import { browserPage } from '../src/browser-page.js';
+import { browserPage, esc } from '../src/browser-page.js';
+import { EN, pageCatalog, t } from '../src/i18n.js';
+import { KO } from '../src/i18n-ko.js';
 
-function page(fetchImpl = () => assert.fail('No request expected'), { narrow = false } = {}) {
+function page(fetchImpl = () => assert.fail('No request expected'), { narrow = false, language = 'en' } = {}) {
   const element = tag => ({ tag, textContent: '', hidden: false, value: '', disabled: false, children: [], style: {}, className: '', title: '', dataset: {}, attributes: {},
     scrollHeight: 0, scrollTop: 0, clientHeight: 0, placeholder: '', querySelectorAll() { return []; },
     setAttribute(name, value) { this.attributes[name] = String(value); }, getAttribute(name) { return this.attributes[name] ?? null; },
@@ -12,15 +14,28 @@ function page(fetchImpl = () => assert.fail('No request expected'), { narrow = f
     set innerHTML(_value) { assert.fail('Untrusted strings must not enter HTML'); },
   });
   const nodes = Object.fromEntries(['meta', 'usage', 'conversation', 'messages', 'composer', 'submit', 'status', 'message', 'feedback', 'error', 'question', 'prompt', 'choices', 'form', 'response', 'recovery', 'pause', 'waiting', 'skip', 'skipbar', 'skipreason', 'skipconfirm', 'skipcancel', 'label', 'dispute'].map(id => [id, element()]));
+  const html = browserPage({ token: 'fixture-token', nonce: 'fixture-nonce', language });
+  // The elements whose words the page fills from data-t* attributes, built from the markup. One with an id is the node the page looks up.
+  const translatable = [...html.split('<script')[0].matchAll(/<(\w+)([^>]*\sdata-t[-=][^>]*)>/gu)].map(([, tag, attrs]) => {
+    const id = attrs.match(/\sid="([^"]+)"/u)?.[1], item = id ? (nodes[id] ??= element(tag)) : element(tag);
+    for (const [, name, key] of attrs.matchAll(/\sdata-(t(?:-\w+)?)="([^"]*)"/gu)) {
+      item.attributes[`data-${name}`] = key;
+      item.dataset[name.replace(/-(\w)/gu, (_, letter) => letter.toUpperCase())] = key;
+    }
+    return item;
+  });
   const buttons = [nodes.pause, element(), { ...element(), dataset: { action: 'learn' } }, { ...element(), dataset: { action: 'dispute' } }];
+  // A [data-t…] selector, or a comma list of them, finds only the translatable elements; every other selector keeps its old answer.
+  const querySelectorAll = selector => selector.includes('[data-t')
+    ? translatable.filter(item => selector.split(',').some(part => Object.hasOwn(item.attributes, part.trim().slice(1, -1))))
+    : selector === '[data-action]' ? buttons.slice(2) : buttons;
   let events;
-  const context = vm.createContext({ document: { visibilityState: 'visible', getElementById: id => nodes[id] ??= element('div'), createElement: element, querySelectorAll: selector => selector === '[data-action]' ? buttons.slice(2) : buttons }, fetch: fetchImpl,
+  const context = vm.createContext({ document: { visibilityState: 'visible', documentElement: { lang: language }, getElementById: id => nodes[id] ??= element('div'), createElement: element, querySelectorAll }, fetch: fetchImpl,
     EventSource: class { constructor() { events = this; this.closed = false; } close() { this.closed = true; } }, matchMedia: () => ({ matches: narrow }),
   });
-  const script = browserPage({ token: 'fixture-token', nonce: 'fixture-nonce' }).match(/<script[^>]*>([\s\S]*?)<\/script>/u)[1];
-  vm.runInContext(script, context);
+  vm.runInContext(html.match(/<script[^>]*>([\s\S]*?)<\/script>/u)[1], context);
   const update = state => events.onmessage({ data: JSON.stringify(state) });
-  return { nodes, buttons, context, update, get events() { return events; } };
+  return { nodes, buttons, translatable, context, update, get events() { return events; } };
 }
 const question = { id: 'a'.repeat(64), sequence: 1, revision: 'r1', phase: 'question', waitingGit: true, target: 'refs/heads/main', repoRoot: '/fixture', question: { id: 'q1', prompt: '<img src=x onerror=steal()>', choices: ['<script>attack()</script>'] }, progress: { completed: 0, total: 1 }, usage: { calls: 1, limit: 20 } };
 
@@ -486,4 +501,67 @@ test('a saved ungraded answer or dispute is restored when its question opens, ke
   d.nodes.response.value = 'Edited.';
   d.update({ ...question, sequence: 2, draft: { kind: 'dispute', text: 'It assumes a unique index.' } });
   assert.equal(d.nodes.response.value, 'Edited.');
+});
+
+const ko = (key, params) => t('ko', key, params);
+
+test('the page renders in Korean from the first Korean state', async () => {
+  // Served in English, as when the language changed before the first state arrived.
+  const { p } = changePage();
+  p.update({ ...withChange, language: 'ko', messages: [{ id: 'm1', role: 'sphinx', kind: 'question', questionId: 'q1', number: 1, text: 'What changes?' }] });
+  await flush();
+  assert.equal(p.context.document.documentElement.lang, 'ko');
+  // Static text and attributes.
+  assert.equal(p.translatable.find(item => item.dataset.t === 'page.header.subtitle').textContent, ko('page.header.subtitle'));
+  assert.equal(p.nodes['file-search'].placeholder, ko('page.files.searchPlaceholder'));
+  assert.equal(p.nodes.messages.getAttribute('aria-label'), ko('page.conversation.listLabel'));
+  assert.equal(p.nodes.response.placeholder, ko('page.composer.answerPlaceholder'));
+  // The script's sentences: the question caption, the file count and the status line.
+  assert.equal(p.nodes.messages.children[0].children[1].textContent, ko('page.conversation.questionNumber', { n: 1 }));
+  assert.equal(p.nodes['count-all'].textContent, ko('page.unit.files', { count: 4, n: '4' }));
+  assert.equal(p.nodes.status.textContent, ko('page.status.questionOf', { n: 1, total: 1 }));
+  assert.equal(p.nodes.waiting.textContent, `${ko('page.waiting.passPush')} ${ko('page.waiting.closingStopPush')}`);
+});
+
+test('a Korean page served in Korean starts in Korean', () => {
+  const html = browserPage({ token: 'fixture-token', nonce: 'fixture-nonce', language: 'ko' }), markup = html.split('<script')[0];
+  assert.match(html, /^<!doctype html>\n<html lang="ko">/u);
+  assert.ok(html.includes(`<title>${esc(KO['page.title.default'])}</title>`));
+  // Each element and attribute the page translates starts with its Korean text, escaped for HTML.
+  const tags = Array.from(markup.matchAll(/<\w+[^>]*\sdata-t[-=][^>]*>[^<]*/gu), ([tag]) => tag);
+  assert.ok(tags.length >= 40, `${tags.length} translatable elements`);
+  for (const tag of tags) {
+    for (const [attribute, shown] of [['data-t', />([^<]*)$/u], ['data-t-label', /\saria-label="([^"]*)"/u], ['data-t-placeholder', /\splaceholder="([^"]*)"/u]]) {
+      const key = tag.match(new RegExp(`\\s${attribute}="([^"]+)"`, 'u'))?.[1];
+      if (key) assert.equal(tag.match(shown)?.[1], esc(KO[key]), key);
+    }
+  }
+  // So does text the script rewrites later.
+  assert.ok(markup.includes(`id="status" class="status" role="status" aria-live="polite">${esc(KO['page.status.connecting'])}<`));
+  assert.ok(markup.includes(`placeholder="${esc(KO['page.composer.answerPlaceholder'])}"`));
+});
+
+test('catalog text is escaped in the HTML and the script', () => {
+  assert.equal(esc('a"<&>'), 'a&quot;&lt;&amp;&gt;');
+  // The script's JSON never holds a "<", so no value (here the token) can end the script or open a comment.
+  const [, script] = browserPage({ token: '</script><!--', nonce: 'fixture-nonce' }).match(/<script[^>]*>([\s\S]*?)<\/script>/u);
+  assert.ok(script.includes('"\\u003c/script>\\u003c!--"'), 'the token is escaped');
+  assert.ok(script.includes(JSON.stringify(pageCatalog()).replace(/</gu, '\\u003c')), 'both catalogs are embedded, escaped the same way');
+});
+
+test('the page draws every page key as t() does, in both languages', () => {
+  const keys = Object.keys(EN).filter(key => key.startsWith('page.'));
+  assert.ok(keys.length > 200, `${keys.length} page keys`);
+  for (const language of ['en', 'ko']) {
+    const tx = vm.runInContext('tx', page(undefined, { language }).context);
+    for (const key of keys) {
+      // Each placeholder gets text that looks like another placeholder and a replacement pattern; a filled value is never read again.
+      const names = Array.from(JSON.stringify(EN[key]).matchAll(/\{(\w+)\}/gu), ([, name]) => name);
+      for (const count of [1, 2]) {
+        const params = { count, ...Object.fromEntries(names.map(name => [name, `{count}$&${name}`])) };
+        assert.equal(tx(key, params), t(language, key, params), `${language} ${key}`);
+      }
+    }
+    assert.equal(tx('page.no.such.key'), 'page.no.such.key');
+  }
 });
