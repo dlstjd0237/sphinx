@@ -438,20 +438,29 @@ export async function dispatchHook({ event, args = [], input = '', cwd = process
   const directory = entry.source.kind === 'path' ? path.resolve(cwd, entry.source.value)
     : path.join(await git(['rev-parse', '--path-format=absolute', '--git-common-dir'], cwd, env), 'hooks');
   const original = path.join(directory, event);
-  let isExecutable = false;
-  try { await access(original, constants.X_OK); isExecutable = true; } catch (error) {
-    if (!['ENOENT', 'ENOTDIR', 'EACCES'].includes(error.code)) throw error;
-  }
-  if (isExecutable) {
+  const runnable = async file => {
+    try { await access(file, constants.X_OK); return true; } catch (error) {
+      if (!['ENOENT', 'ENOTDIR', 'EACCES'].includes(error.code)) throw error;
+      return false;
+    }
+  };
+  const isExecutable = await runnable(original);
+  // When <event> is missing, Git for Windows runs <event>.exe instead (STRIP_EXTENSION).
+  const exe = !isExecutable && platform === 'win32' && await runnable(`${original}.exe`) ? `${original}.exe` : null;
+  if (isExecutable || exe) {
     const stdio = [event === 'pre-commit' ? 'inherit' : 'pipe', 'inherit', 'inherit'];
     const code = await new Promise((resolve, reject) => {
       // Windows cannot start an extensionless `#!` script, so Git's sh runs it, finding the interpreter by the name in its
       // shebang as Git does (RUN_HOOK). MSYS2 strips quotes from and globs unquoted arguments, so every one is quoted. The hook
       // searches for commands as it would under Git alone; libuv reads the cwd-search block from this process, so finding `sh`
       // stays protected. Its $0 has forward slashes, as Git for Windows gives it, for hooks that use "${0##*/}" or "${0%/*}".
-      const child = platform === 'win32'
-        ? spawnImpl('sh', ['-c', `${RUN_HOOK}\nrun_hook "$0" "$@"`, original.replaceAll('\\', '/'), ...args].map(msys2Quote), { cwd, env: withoutAddedCwdBlock({ ...env, SPHINX_HOOK_DEPTH: '1' }), stdio, windowsVerbatimArguments: true })
-        : spawnImpl(original, args, { cwd, env: { ...env, SPHINX_HOOK_DEPTH: '1' }, stdio });
+      // An .exe hook is a program, which Git starts with CreateProcess and its arguments unchanged. So is it here: through sh,
+      // MSYS2 would turn a POSIX-looking argument such as /srv/git/repo.git into a path inside Git's own folder.
+      const child = exe
+        ? spawnImpl(exe, args, { cwd, env: withoutAddedCwdBlock({ ...env, SPHINX_HOOK_DEPTH: '1' }), stdio })
+        : platform === 'win32'
+          ? spawnImpl('sh', ['-c', `${RUN_HOOK}\nrun_hook "$0" "$@"`, original.replaceAll('\\', '/'), ...args].map(msys2Quote), { cwd, env: withoutAddedCwdBlock({ ...env, SPHINX_HOOK_DEPTH: '1' }), stdio, windowsVerbatimArguments: true })
+          : spawnImpl(original, args, { cwd, env: { ...env, SPHINX_HOOK_DEPTH: '1' }, stdio });
       // A hook may exit without reading stdin: EPIPE on POSIX, EOF on Windows.
       child.stdin?.on('error', error => { if (!['EPIPE', 'EOF'].includes(error.code)) reject(error); });
       child.on('error', reject);

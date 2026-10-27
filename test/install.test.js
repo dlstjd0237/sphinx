@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, rm, chmod, symlink, lstat } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm, chmod, symlink, lstat, copyFile } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -264,6 +264,56 @@ test('on Windows a chained hook that reads its name or folder from $0 runs as it
   const zero = await readFile(output, 'utf8');
   assert.doesNotMatch(zero, /\\/);
   assert.match(zero, /\/\.git\/hooks\/pre-push$/);
+});
+
+test('on Windows a pre-push.exe hook is started directly with the arguments Git gives it, and elsewhere it is ignored', async t => {
+  const f = await fixture(t);
+  await install(f.options);
+  const hooks = path.join(f.git('rev-parse', '--path-format=absolute', '--git-common-dir'), 'hooks');
+  await executable(path.join(hooks, 'pre-push.exe'), 'a program');
+  const calls = [];
+  const spawnImpl = (command, args, options) => {
+    calls.push({ command, args, options });
+    const child = new EventEmitter();
+    child.stdin = { on() {}, end() {} };
+    setImmediate(() => child.emit('close', 9, null));
+    return child;
+  };
+  const args = ['origin', '/srv/git/repo.git'];
+  const added = { ...f.env, NoDefaultCurrentDirectoryInExePath: '1', SPHINX_ADDED_NO_CWD_SEARCH: '1' };
+  let gated = 0;
+  const run = platform => dispatchHook({ event: 'pre-push', args, input: 'refs/heads/main 1 refs/heads/main 2\n', cwd: f.repo, env: added, gate: async () => { gated++; return 0; }, spawnImpl, platform });
+  // When <name> is missing, Git for Windows runs <name>.exe, and with CreateProcess, so its arguments arrive unchanged.
+  // Through sh, MSYS2 would turn /srv/git/repo.git into a path inside Git's own folder.
+  assert.equal(await run('win32'), 9, 'the hook rejects the push');
+  assert.equal(gated, 0);
+  const [exe] = calls;
+  assert.equal(exe.command, path.join(hooks, 'pre-push.exe'));
+  assert.deepEqual(exe.args, args);
+  assert.equal('windowsVerbatimArguments' in exe.options, false);
+  assert.equal(exe.options.cwd, f.repo);
+  assert.deepEqual(exe.options.stdio, ['pipe', 'inherit', 'inherit']);
+  assert.equal(exe.options.env.SPHINX_HOOK_DEPTH, '1');
+  assert.equal('NoDefaultCurrentDirectoryInExePath' in exe.options.env, false, 'the hook searches for commands as under Git alone');
+  // Elsewhere Git never looks for an .exe hook.
+  assert.equal(await run('linux'), 0);
+  assert.equal(calls.length, 1);
+  assert.equal(gated, 1);
+  // A hook named exactly for the event comes first, as in Git.
+  await executable(path.join(hooks, 'pre-push'), '#!/bin/sh\nexit 0\n');
+  assert.equal(await run('win32'), 9);
+  assert.equal(calls[1].command, 'sh');
+});
+
+test('on Windows a rejecting pre-push.exe hook still stops the push', { skip: process.platform !== 'win32', timeout: 60000 }, async t => {
+  const f = await fixture(t);
+  await install(f.options);
+  // where.exe fails on a hook's arguments, as a rejecting hook would.
+  await copyFile(path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'where.exe'), path.join(f.repo, '.git', 'hooks', 'pre-push.exe'));
+  let gated = 0;
+  const status = await dispatchHook({ event: 'pre-push', args: ['origin', '/srv/git/repo.git'], input: 'refs/heads/main 1 refs/heads/main 2\n', cwd: f.repo, env: f.env, gate: async () => { gated++; return 0; } });
+  assert.notEqual(status, 0);
+  assert.equal(gated, 0);
 });
 
 test('an existing pre-push hook in a path with Hangul, an apostrophe, braces and spaces still chains', async t => {
