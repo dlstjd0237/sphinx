@@ -884,11 +884,16 @@ test('macOS hooks append the reviewer CLI directories after the GUI PATH', async
   const on = (...directories) => ({ PATH: directories.join(path.delimiter) });
   const direct = { env: '', command: `${q(node)} ${q(cli)}` };
   const appended = (...directories) => ({ ...direct, env: `PATH="$PATH"${directories.map(directory => `:${q(directory)}`).join('')} ` });
-  // Each directory goes after $PATH once, in the order claude, codex, gh, so the GUI client's own git and system tools stay first.
+  // Each directory goes after $PATH once, in its PATH order, so the GUI client's own git and system tools stay first and a
+  // tool installed in two places resolves to the copy the user's shell would run.
   const launcher = await sphinxLauncher(cli, on(tools), node, 'darwin');
   assert.deepEqual(launcher, appended(tools));
   assert.ok(launcher.env.endsWith(`tools '\\'' bin' `), 'A quote in a directory name is closed, escaped and reopened');
-  assert.deepEqual(await sphinxLauncher(cli, on(more, tools), node, 'darwin'), appended(tools, more));
+  assert.deepEqual(await sphinxLauncher(cli, on(more, tools), node, 'darwin'), appended(more, tools));
+  const ghOnly = path.join(f.base, 'gh only'), claudeOnly = path.join(f.base, 'claude only');
+  await executable(path.join(ghOnly, 'gh'), '#!/bin/sh\n');
+  await executable(path.join(claudeOnly, 'claude'), '#!/bin/sh\n');
+  assert.deepEqual(await sphinxLauncher(cli, on(ghOnly, claudeOnly, ghOnly), node, 'darwin'), appended(ghOnly, claudeOnly));
   assert.deepEqual(await sphinxLauncher(cli, on(path.join(f.base, 'none')), node, 'darwin'), direct, 'Without a reviewer CLI there is no PATH change');
   // A relative PATH entry would resolve against whichever repository the hook runs in, so it is never recorded.
   await executable(path.join(f.base, 'relative', 'claude'), '#!/bin/sh\n');

@@ -37,8 +37,8 @@ const launchGone = (file, repo) => `Sphinx's hooks start ${file}, which no longe
  * colon, so it would only work in repositories on drive C:, and Windows files
  * carry no execute bit to recognise a shim by.
  * On macOS, a GUI Git client runs hooks with launchd's PATH, which lacks ~/.local/bin, Homebrew and nvm, so the
- * directories where claude, codex and gh are found now go after $PATH. After it, so they never shadow the client's own
- * git or system tools; installing a reviewer CLI somewhere else later takes another `sphinx install`.
+ * directories where claude, codex and gh are found go after $PATH, in their PATH order. After it, so they never shadow the
+ * client's own git or system tools; installing a reviewer CLI somewhere else later takes another `sphinx install`.
  * Returns shell `env` assignments (placed before any exec) and the `command`.
  */
 export async function sphinxLauncher(cliPath, env = process.env, execPath = process.execPath, platform = process.platform) {
@@ -47,7 +47,7 @@ export async function sphinxLauncher(cliPath, env = process.env, execPath = proc
   // Looked up on the absolute entries only: a relative one would resolve against whichever repository the hook runs in.
   const absolute = { PATH: directories.join(path.delimiter) };
   const found = platform === 'darwin' ? await Promise.all(['claude', 'codex', 'gh'].map(name => executable(name, absolute))) : [];
-  const extra = [...new Set(found.filter(Boolean))].map(directory => `:${quote(directory)}`).join('');
+  const extra = [...new Set(directories.filter(directory => found.includes(directory)))].map(directory => `:${quote(directory)}`).join('');
   const real = await realpath(cliPath).catch(() => cliPath);
   for (const directory of directories) {
     const candidate = path.join(directory, 'sphinx');
