@@ -15,13 +15,13 @@ export function browserPage({ token, nonce, language = 'en' }) {
   return `<!doctype html>
 <html lang="${language}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${html('page.title.default')}</title>
 <style nonce="${nonce}">
-:root{color-scheme:light;--ink:#292524;--muted:#6b6259;--line:#dfd8cf;--paper:#faf8f5;--amber:#a45009;--focus:#b45309;--pass:#3d6b35;--retry:#8d271e;--add:#e8f1e3;--add-ink:#2f5d28;--del:#f8e6e2;--del-ink:#8d271e;--mark:#fdf0cc;--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
+:root{color-scheme:light;--ink:#292524;--muted:#6b6259;--line:#dfd8cf;--paper:#faf8f5;--amber:#a45009;--focus:#b45309;--pass:#3d6b35;--retry:#8d271e;--add:#e8f1e3;--add-ink:#2f5d28;--del:#f8e6e2;--del-ink:#8d271e;--mark:#fdf0cc;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.6 "Avenir Next",Avenir,sans-serif}
 button,textarea{font:inherit}button{cursor:pointer}button:disabled{cursor:default;opacity:.5}
 button:focus-visible,textarea:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 .shell{height:100vh;height:100dvh;display:flex;flex-direction:column}
 header{min-height:52px;border-bottom:1px solid var(--line);padding:8px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px}
-.brand{display:flex;align-items:center;gap:14px}.brand strong{display:flex;align-items:center;gap:9px;font:600 19px ui-monospace,SFMono-Regular,Menlo,monospace}.brand svg{color:var(--amber);flex-shrink:0}.brand span{color:var(--muted);font-size:14px}
+.brand{display:flex;align-items:center;gap:14px}.brand strong{display:flex;align-items:center;gap:9px;font:600 19px var(--mono)}.brand svg{color:var(--amber);flex-shrink:0}.brand span{color:var(--muted);font-size:14px}
 .brand small{font:12px var(--mono);color:var(--muted);margin-left:-8px}.update{font-size:12px;padding:2px 10px;border:1px solid var(--line);border-radius:999px;background:transparent;color:var(--amber);cursor:pointer;white-space:nowrap}.update:hover:not(:disabled){border-color:var(--amber)}.update:disabled{color:var(--muted);cursor:default}
 .scope{border-bottom:1px solid var(--line);padding:7px 24px;font-size:13px;line-height:1.45;color:var(--muted)}
 .facts dt{display:none}.facts dd{font-weight:400!important}.facts div:has(#scope-range){display:none}.facts div+div::before{content:"·";margin-right:8px;color:#b7ab9c}.facts #meta{color:var(--ink);font-weight:600!important}.scope-note{display:none!important}
@@ -115,9 +115,12 @@ footer{flex-shrink:0;display:flex;flex-wrap:wrap;gap:2px 8px;padding:0 0 14px;co
 #question-pane{overflow-y:auto}.conversation{flex:none;overflow:visible;padding-right:0}.evidence{max-height:none;overflow:visible}}
 @media(max-width:700px){header{flex-wrap:wrap;row-gap:0}.score{flex:1 1 0;min-width:0;max-width:max-content}header .tools{flex-basis:100%;justify-content:flex-end}}
 @media(max-width:600px){header{padding:8px 12px}.brand{gap:8px}.brand span{display:none}.scope{padding:6px 12px 7px;font-size:12.5px}.facts{gap:0 12px}.facts .mono{font-size:12px}#scope-note{display:none}.scope-short{display:block}.hint,footer{font-size:11.5px}main{padding:0 14px}.conversation{padding-top:16px}.turn.human{margin-left:16px}.actions{gap:4px}button{padding:7px 10px}.hint{max-width:34em}.diffhead{padding:8px 12px}.legend{padding:6px 12px}}
+:lang(ko) body{font-family:"Avenir Next",Avenir,"Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",sans-serif}
+:lang(ko){word-break:keep-all}
+:lang(ko) .badge,:lang(ko) .model-menu .group{letter-spacing:0;font-size:12px}
 </style></head><body><div class="shell">
 <header><div class="brand"><strong>${sphinxMark({ size: 26, id: 'brand-mark' })}sphinx</strong><small id="version">v${VERSION}</small><button id="update" class="update" type="button" hidden></button><span data-t="page.header.subtitle">${html('page.header.subtitle')}</span></div><div id="score" class="score" hidden><span class="score-head"><span class="score-label" data-t="page.score.label">${html('page.score.label')}</span><strong id="score-value" class="score-value"></strong></span><span id="score-dots" class="score-dots" role="img"></span><span id="score-meta" class="score-meta"></span></div><div class="tools"><button id="skip" class="quiet" type="button" data-t="page.header.skip">${html('page.header.skip')}</button><button id="pause" class="quiet" type="button">${html('page.header.pause')}</button></div></header>
-<section class="scope" aria-label="${html('page.scope.label')}" data-t-label="page.scope.label"><dl class="facts"><div><dt data-t="page.scope.repository">${html('page.scope.repository')}</dt><dd id="meta"></dd></div><div><dt id="scope-op-label" data-t="page.scope.operation">${html('page.scope.operation')}</dt><dd id="scope-op">${html('page.scope.loading')}</dd></div><div><dt data-t="page.scope.comparison">${html('page.scope.comparison')}</dt><dd id="scope-range" class="mono">${html('page.scope.loading')}</dd></div><div><dt data-t="page.scope.changed">${html('page.scope.changed')}</dt><dd id="scope-stats">${html('page.scope.loading')}</dd></div><div id="scope-excluded-row" hidden><dt data-t="page.scope.excluded">${html('page.scope.excluded')}</dt><dd id="scope-excluded"></dd></div><div><dt data-t="page.scope.progress">${html('page.scope.progress')}</dt><dd id="scope-progress">${html('page.scope.connecting')}</dd></div><div class="model-cell"><dd><button id="distance" class="model-chip" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="distance-menu" hidden></button><button id="model" class="model-chip" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="model-menu" hidden></button><span id="usage"></span></dd><section id="distance-menu" class="model-menu" role="dialog" aria-label="${html('page.distance.menuLabel')}" data-t-label="page.distance.menuLabel" hidden></section><section id="model-menu" class="model-menu" role="dialog" aria-label="${html('page.model.menuLabel')}" data-t-label="page.model.menuLabel" hidden></section></div></dl>
+<section class="scope" aria-label="${html('page.scope.label')}" data-t-label="page.scope.label"><dl class="facts"><div><dt data-t="page.scope.repository">${html('page.scope.repository')}</dt><dd id="meta"></dd></div><div><dt id="scope-op-label" data-t="page.scope.operation">${html('page.scope.operation')}</dt><dd id="scope-op">${html('page.scope.loading')}</dd></div><div><dt data-t="page.scope.comparison">${html('page.scope.comparison')}</dt><dd id="scope-range" class="mono">${html('page.scope.loading')}</dd></div><div><dt data-t="page.scope.changed">${html('page.scope.changed')}</dt><dd id="scope-stats">${html('page.scope.loading')}</dd></div><div id="scope-excluded-row" hidden><dt data-t="page.scope.excluded">${html('page.scope.excluded')}</dt><dd id="scope-excluded"></dd></div><div><dt data-t="page.scope.progress">${html('page.scope.progress')}</dt><dd id="scope-progress">${html('page.scope.connecting')}</dd></div><div class="model-cell"><dd><button id="language" class="model-chip" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="language-menu" title="${html('page.language.chipTitle')}" data-t-title="page.language.chipTitle" hidden></button><button id="distance" class="model-chip" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="distance-menu" hidden></button><button id="model" class="model-chip" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="model-menu" hidden></button><span id="usage"></span></dd><section id="language-menu" class="model-menu" role="dialog" aria-label="${html('page.language.menuLabel')}" data-t-label="page.language.menuLabel" hidden></section><section id="distance-menu" class="model-menu" role="dialog" aria-label="${html('page.distance.menuLabel')}" data-t-label="page.distance.menuLabel" hidden></section><section id="model-menu" class="model-menu" role="dialog" aria-label="${html('page.model.menuLabel')}" data-t-label="page.model.menuLabel" hidden></section></div></dl>
 <p id="scope-note" class="scope-note">${html('page.scope.note')}</p><p class="scope-note scope-short" data-t="page.scope.noteShort">${html('page.scope.noteShort')}</p></section>
 <nav class="tabs" role="tablist" aria-label="${html('page.tabs.label')}" data-t-label="page.tabs.label"><button id="tab-question" role="tab" type="button" aria-controls="question-pane" aria-selected="true" data-t="page.tabs.question">${html('page.tabs.question')}</button><button id="tab-files" role="tab" type="button" aria-controls="files-pane" aria-selected="false" data-t="page.tabs.files">${html('page.tabs.files')}</button><button id="tab-diff" role="tab" type="button" aria-controls="diff-pane" aria-selected="false" data-t="page.tabs.diff">${html('page.tabs.diff')}</button></nav>
 <div id="announce" class="sr" aria-live="polite"></div>
@@ -155,14 +158,21 @@ const CATALOG=${scriptJSON(pageCatalog())};
 let pageLanguage=${scriptJSON(language)},lastStateLanguage;
 const tx=(key,params={})=>{const entry=CATALOG[pageLanguage]?.[key]??CATALOG.en[key],text=entry!==null&&typeof entry==='object'?(params.count===1?entry.one:entry.other):entry;
  return typeof text==='string'?text.replace(/\\{(\\w+)\\}/g,(match,name)=>Object.hasOwn(params,name)?String(params[name]):match):key;};
-// Redraws the page in a language: the words marked data-t*, the composer's words for its mode, then the current state.
+// Redraws the page's own words in a language: the words marked data-t*, the composer's words for its mode, the diff
+// pane and the notes written once. It clears the memos, so the render that always follows (render calls this first,
+// the chip renders after it) redraws the lists, chips, open menus and controls. The draft and the focus stay.
 function applyLanguage(language){
  pageLanguage=language;document.documentElement.lang=language;
  for(const item of document.querySelectorAll('[data-t]'))item.textContent=tx(item.dataset.t);
  for(const item of document.querySelectorAll('[data-t-placeholder]'))item.placeholder=tx(item.dataset.tPlaceholder);
  for(const item of document.querySelectorAll('[data-t-label]'))item.setAttribute('aria-label',tx(item.dataset.tLabel));
  for(const item of document.querySelectorAll('[data-t-title]'))item.title=tx(item.dataset.tTitle);
- disputeText(disputing);if(current)render(current);
+ lastMessages=lastConsent=lastFiles=lastEvidence='';
+ disputeText(disputing);
+ if(!selected)emptyDiffText();else if(diffFailure)$('diff-note').textContent=diffFailure();else if(diff&&diff.path===selected)drawDiff(undefined,true);else $('diff-meta').textContent=tx('page.diff.loading');
+ if(filesText)$('files-note').textContent=filesText();
+ if(!current?.change?.header)$('scope-note').textContent=tx('page.scope.note');
+ $('resume-copy').textContent=tx('page.resume.copy');
 }
 const text=(id,value)=>{$(id).textContent=value||'';$(id).hidden=!value;};
 // An error shows in any unfinished step; outside a question, only its line.
@@ -228,7 +238,7 @@ function buildMenu(state){
    row.append(input,use);parts.push(row);
   }
  }
- if(menuError)parts.push(node('p','menu-error',menuError));
+ if(menuError)parts.push(node('p','menu-error',menuError()));
  const foot=node('label','menu-foot'),save=node('input');save.type='checkbox';save.id='model-save';save.checked=keep;foot.append(save,node('span','',tx('page.model.saveDefault')));parts.push(foot);
  $('model-menu').replaceChildren(...parts);
  if(pendingPick)$('model-menu').scrollTop=0;
@@ -237,13 +247,13 @@ function pick(state,choice){menuError='';if(state.models?.reviewing){pendingPick
 async function commit(choice){
  const save=document.getElementById('model-save')?.checked===true;pendingPick=null;
  try{const res=await fetch(base+'/action?model=1',{method:'POST',headers:{'Content-Type':'application/json','X-Sphinx-Token':token},body:JSON.stringify({provider:choice.provider,model:choice.model,saveDefault:save})});
-  const data=await res.json().catch(()=>({}));if(!res.ok){menuError=data.error||tx('page.model.switchFailed');buildMenu(current);return;}closeMenu();}
- catch{menuError=tx('page.menu.unreachable');buildMenu(current);}
+  const data=await res.json().catch(()=>({}));if(!res.ok){menuError=()=>data.error||tx('page.model.switchFailed');buildMenu(current);return;}closeMenu();}
+ catch{menuError=()=>tx('page.menu.unreachable');buildMenu(current);}
 }
-$('model').onclick=()=>{if(menuOpen){closeMenu();return;}closeDistance();menuOpen=true;menuError='';$('model-menu').hidden=false;$('model-menu').style.left=$('model').offsetLeft+'px';$('model').setAttribute('aria-expanded','true');buildMenu(current);$('model-menu').querySelector?.('[aria-checked="true"]')?.focus?.();};
-document.onkeydown=event=>{if(event.key!=='Escape')return;if(menuOpen){closeMenu();$('model').focus();}if(distanceOpen){closeDistance();$('distance').focus();}};
+$('model').onclick=()=>{if(menuOpen){closeMenu();return;}closeDistance();closeLanguage();menuOpen=true;menuError='';$('model-menu').hidden=false;$('model-menu').style.left=$('model').offsetLeft+'px';$('model').setAttribute('aria-expanded','true');buildMenu(current);$('model-menu').querySelector?.('[aria-checked="true"]')?.focus?.();};
+document.onkeydown=event=>{if(event.key!=='Escape')return;if(menuOpen){closeMenu();$('model').focus();}if(distanceOpen){closeDistance();$('distance').focus();}if(languageOpen){closeLanguage();$('language').focus();}};
 // A click inside the menu can rebuild it, detaching the clicked button; that is not a click outside.
-document.onclick=event=>{if(event.target?.isConnected===false)return;if(menuOpen&&!$('model-menu').contains?.(event.target)&&!$('model').contains?.(event.target))closeMenu();if(distanceOpen&&!$('distance-menu').contains?.(event.target)&&!$('distance').contains?.(event.target))closeDistance();};
+document.onclick=event=>{if(event.target?.isConnected===false)return;if(menuOpen&&!$('model-menu').contains?.(event.target)&&!$('model').contains?.(event.target))closeMenu();if(distanceOpen&&!$('distance-menu').contains?.(event.target)&&!$('distance').contains?.(event.target))closeDistance();if(languageOpen&&!$('language-menu').contains?.(event.target)&&!$('language').contains?.(event.target))closeLanguage();};
 $('resume-copy').onclick=async()=>{try{await navigator.clipboard.writeText($('resume-command').textContent);$('resume-copy').textContent=tx('page.resume.copied');setTimeout(()=>{$('resume-copy').textContent=tx('page.resume.copy');},1500);}catch{}};
 // A background tab says when it is waiting on you.
 const waitingOnYou=()=>['question','recovery','consent'].includes(current?.phase)&&!finished;
@@ -253,7 +263,7 @@ document.onvisibilitychange=titleView;
 function stampView(state){
  const s=state.stamp,row=$('stamp-row');row.hidden=!s||finished;if(row.hidden)return;
  $('stamp').checked=!!s.post;
- row.title=(s.action?'This repository shows a Sphinx check on pull requests. ':'')+'After you pass, Sphinx comments on this branch\u2019s pull request with a summary: how many questions, which you got right first time, and the model.'+(s.action?' The Sphinx check reads it.':'')+' Your answers are not included unless you turn that on in your settings.';
+ row.title=tx(s.action?'page.stamp.tooltipAction':'page.stamp.tooltip');
 }
 $('stamp').onchange=async()=>{const want=$('stamp').checked;try{const res=await fetch(base+'/action?stamp=1',{method:'POST',headers:{'Content-Type':'application/json','X-Sphinx-Token':token},body:JSON.stringify({post:want})});if(!res.ok)$('stamp').checked=!want;}catch{$('stamp').checked=!want;}};
 // The question distance: shown as a chip, explained in its tooltip, and changeable
@@ -285,7 +295,39 @@ function buildDistance(state){
 async function chooseDistance(value){
  try{const res=await fetch(base+'/action?distance=1',{method:'POST',headers:{'Content-Type':'application/json','X-Sphinx-Token':token},body:JSON.stringify({distance:value})});if(res.ok)closeDistance();}catch{}
 }
-$('distance').onclick=()=>{if(distanceOpen){closeDistance();return;}closeMenu();distanceOpen=true;$('distance-menu').hidden=false;$('distance-menu').style.left=$('distance').offsetLeft+'px';$('distance').setAttribute('aria-expanded','true');buildDistance(current);};
+$('distance').onclick=()=>{if(distanceOpen){closeDistance();return;}closeMenu();closeLanguage();distanceOpen=true;$('distance-menu').hidden=false;$('distance-menu').style.left=$('distance').offsetLeft+'px';$('distance').setAttribute('aria-expanded','true');buildDistance(current);};
+// The questionnaire language: a chip naming the page's language, opening a menu of both. A pick redraws the page at
+// once and saves it on the server. A failed pick shows in the menu, and the page then follows the server's next state.
+const LANGUAGE_NAMES=${scriptJSON({ en: t('en', 'common.language.en'), ko: t('ko', 'common.language.ko') })};
+let languageOpen=false,languageError='';
+function languageView(){
+ const chip=$('language');chip.hidden=finished;if(chip.hidden){closeLanguage();return;}
+ chip.replaceChildren(node('span','',LANGUAGE_NAMES[pageLanguage]),node('span','caret','▾'));
+ if(languageOpen)buildLanguage();
+}
+function closeLanguage(){if(!languageOpen)return;languageOpen=false;languageError='';$('language-menu').hidden=true;$('language').setAttribute('aria-expanded','false');}
+function buildLanguage(){
+ const parts=[node('h3','',tx('page.language.menuTitle'))];
+ for(const value of ['en','ko']){
+  // Each name is in its own language, which a screen reader then speaks in that language.
+  const button=node('button','option'),name=node('span','name',LANGUAGE_NAMES[value]);button.type='button';name.lang=value;
+  button.setAttribute('role','menuitemradio');button.setAttribute('aria-checked',String(value===pageLanguage));
+  button.append(node('span','dot',value===pageLanguage?'●':''),name);button.onclick=()=>chooseLanguage(value);parts.push(button);
+ }
+ if(languageError)parts.push(node('p','menu-error',languageError()));
+ $('language-menu').replaceChildren(...parts);
+}
+async function chooseLanguage(value){
+ // The redraw replaces the option that had focus, so focus goes back to the chip, as Escape does.
+ languageError='';applyLanguage(value);if(current)render(current);$('language').focus();
+ try{const res=await fetch(base+'/action?language=1',{method:'POST',headers:{'Content-Type':'application/json','X-Sphinx-Token':token},body:JSON.stringify({language:value})}),data=await res.json().catch(()=>({}));
+  if(res.ok&&!data.languageError){closeLanguage();return;}
+  // A failed save still switched this Git operation. A refused pick switched nothing, so the next state decides.
+  if(res.ok)languageError=()=>data.languageError;else{languageError=()=>data.error||tx('page.menu.unreachable');lastStateLanguage=undefined;}}
+ catch{languageError=()=>tx('page.menu.unreachable');lastStateLanguage=undefined;}
+ if(languageOpen)buildLanguage();
+}
+$('language').onclick=()=>{if(languageOpen){closeLanguage();return;}closeMenu();closeDistance();languageOpen=true;languageError='';$('language-menu').hidden=false;$('language-menu').style.left=$('language').offsetLeft+'px';$('language').setAttribute('aria-expanded','true');buildLanguage();$('language-menu').querySelector?.('[aria-checked="true"]')?.focus?.();};
 
 // A newer release is offered quietly; installing waits until this check ends.
 function updateView(u){const b=$('update');if(!u?.available){b.hidden=true;return;}b.hidden=false;
@@ -343,11 +385,12 @@ function render(state){
  if(current&&state.sequence<current.sequence)return;
  const previous=current;current=state;finished=state.operationClosed||['passed','paused','error','skipped','stopped'].includes(state.phase);
  // A state names the questionnaire language. The page follows a change from the last state's language (a pick made
- // elsewhere), never a mere difference from its own, and a state without one changes nothing.
- if(state.language&&state.language!==lastStateLanguage){lastStateLanguage=state.language;if(state.language!==pageLanguage)applyLanguage(state.language);}
+ // elsewhere), never a mere difference from its own, and a state without one changes nothing. Drawing the same state
+ // again, as the chip does, brings no new state.
+ if(state!==previous&&state.language&&state.language!==lastStateLanguage){lastStateLanguage=state.language;if(state.language!==pageLanguage)applyLanguage(state.language);}
  const repo=state.repoName||state.repoRoot?.split(/[\\\\/]/).filter(Boolean).at(-1),branch=state.target?.replace(/^refs\\/heads\\//,'');
  text('meta',repo||state.change?.header?.repository||'');$('meta').title=state.repoRoot||'';
- modelView(state);distanceView(state);stampView(state);titleView();
+ modelView(state);distanceView(state);languageView();stampView(state);titleView();
  $('resume').hidden=!(['paused','stopped'].includes(state.phase)&&state.resume);if(state.resume)$('resume-command').textContent=state.resume;scoreView(state.score);updateView(state.update);const messages=state.messages||[];
  // While Git waits, pausing stops it, so the button says so in the scope line's words.
  const isCommit=operation(state)==='commit';$('pause').textContent=tx(state.waitingGit?(isCommit?'page.header.stopCommit':'page.header.stopPush'):'page.header.pause');
@@ -445,7 +488,8 @@ $('skipreason').onkeydown=event=>{if(event.key==='Enter'&&!event.isComposing){ev
 
 // Change context: a read-only view of the exact frozen comparison. Every value
 // from the repository enters the DOM through textContent, never markup.
-let change,changeFor,changeLoading=false,filter='all',query='',selected,diff,diffSeq=0,tab='question',lastFiles='',lastEvidence='';const contextFor=new Map();
+// filesText and diffFailure draw the notes a load leaves, so a language switch can redraw them.
+let change,changeFor,changeLoading=false,filter='all',query='',selected,diff,diffSeq=0,tab='question',lastFiles='',lastEvidence='',filesText,diffFailure;const contextFor=new Map();
 const el=(tag,className,value)=>{const node=document.createElement(tag);if(className)node.className=className;if(value!=null)node.textContent=value;return node;};
 const num=n=>Number(n).toLocaleString('en-US');
 // A plural key's params: the raw count picks the English form, and the number is shown grouped.
@@ -495,15 +539,17 @@ function checkpoint(state){
 }
 async function getJSON(path){const res=await fetch(base+path);let data={};try{data=await res.json();}catch{}return {ok:res.ok,status:res.status,data};}
 async function loadChange(id){
- changeLoading=true;
+ changeLoading=true;filesText=undefined;
  try{
   const r=await getJSON('/change?id='+encodeURIComponent(id));
   if(current?.id!==id)return;
-  if(r.ok&&r.data.status==='ready'){change=r.data;changeFor=id;lastFiles='';$('files-note').textContent=filesNote();files();evidenceList();}
-  else $('files-note').textContent=tx('page.files.unavailable',{reason:r.data.error||r.data.reason||tx('page.files.requestFailed')});
- }catch{$('files-note').textContent=tx('page.files.loadFailed');}
+  if(r.ok&&r.data.status==='ready'){change=r.data;changeFor=id;lastFiles='';filesNoteView(filesNote);files();evidenceList();}
+  else filesNoteView(()=>tx('page.files.unavailable',{reason:r.data.error||r.data.reason||tx('page.files.requestFailed')}));
+ }catch{filesNoteView(()=>tx('page.files.loadFailed'));}
  finally{changeLoading=false;}
 }
+// A server's reason stays as it was sent; only the page's own words change language.
+function filesNoteView(draw){filesText=draw;$('files-note').textContent=draw();}
 function filesNote(){
  if(!change)return '';
  const notes=[];
@@ -564,23 +610,27 @@ function setTab(name){
 }
 for(const id of ['question','files','diff'])$('tab-'+id).onclick=()=>{setTab(id);announce(tx(id==='question'?'page.announce.questionView':id==='files'?'page.announce.filesView':'page.announce.diffView'));};
 $('back-question').onclick=()=>{setTab('question');$('response').focus({preventScroll:true});announce(tx('page.announce.backToQuestion'));};
-function clearDiff(){$('diff-title').textContent=tx('page.diff.noFile');$('diff-meta').textContent=tx(hinted?'page.diff.browseHinted':'page.diff.browse');$('diff-body').replaceChildren();$('diff-note').hidden=true;$('diff-legend').hidden=true;$('context-more').hidden=true;$('context-all').hidden=true;}
+// The empty diff pane's words, apart from clearDiff's clearing so a language switch can redraw them.
+function emptyDiffText(){$('diff-title').textContent=tx('page.diff.noFile');$('diff-meta').textContent=tx(hinted?'page.diff.browseHinted':'page.diff.browse');}
+function clearDiff(){emptyDiffText();$('diff-body').replaceChildren();$('diff-note').hidden=true;$('diff-legend').hidden=true;$('context-more').hidden=true;$('context-all').hidden=true;}
 // Why a diff shows no lines, by the change view's note code.
 const NOTES={binary:'page.diffNote.binary',symlink:'page.diffNote.symlink',submodule:'page.diffNote.submodule',unsupported:'page.diffNote.unsupported','rename-only':'page.diffNote.renameOnly','mode-only':'page.diffNote.modeOnly',empty:'page.diffNote.empty','too-large':'page.diffNote.tooLarge','non-utf8':'page.diffNote.nonUtf8'};
 async function openFile(path,{show=false,range,quiet=false}={}){
  if(!current||!change)return;
  selected=path;files();if(show)setTab('diff');
  const level=contextFor.get(path)||'3',id=current.id,seq=++diffSeq;
- $('diff-title').textContent=path;$('diff-meta').textContent=tx('page.diff.loading');
+ diffFailure=undefined;$('diff-title').textContent=path;$('diff-meta').textContent=tx('page.diff.loading');
  try{
   const r=await getJSON('/diff?id='+encodeURIComponent(id)+'&path='+encodeURIComponent(path)+'&context='+encodeURIComponent(level));
   if(seq!==diffSeq||current?.id!==id)return;
-  if(!r.ok){diff=undefined;$('diff-body').replaceChildren();$('diff-meta').textContent='';$('diff-note').textContent=r.data.error||tx('page.diff.unavailable');$('diff-note').hidden=false;return;}
+  if(!r.ok){diff=undefined;$('diff-body').replaceChildren();diffFailureView(()=>r.data.error||tx('page.diff.unavailable'));return;}
   diff=r.data;
   if(range&&level!=='all'&&!visible(range)&&!diff.note){contextFor.set(path,'all');return openFile(path,{range,quiet});}
   drawDiff(quiet?undefined:range,quiet);
- }catch{if(seq===diffSeq){$('diff-meta').textContent='';$('diff-note').textContent=tx('page.diff.loadFailed');$('diff-note').hidden=false;}}
+ }catch{if(seq===diffSeq)diffFailureView(()=>tx('page.diff.loadFailed'));}
 }
+// As for the files note, a server's reason stays as it was sent.
+function diffFailureView(draw){diffFailure=draw;$('diff-meta').textContent='';$('diff-note').textContent=draw();$('diff-note').hidden=false;}
 function rowsOf(d){return (d?.hunks||[]).flatMap(h=>h.rows);}
 function visible(range){return rowsOf(diff).some(row=>row[range.side]!=null&&row[range.side]>=range.start&&row[range.side]<=range.end);}
 function marked(row,ranges){return ranges.some(r=>row[r.side]!=null&&row[r.side]>=r.start&&row[r.side]<=r.end);}
