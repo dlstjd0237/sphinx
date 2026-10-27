@@ -188,7 +188,8 @@ function printInstallationResult(terminal, result) {
   for (const line of result.warnings) terminal.warning(line);
 }
 
-// Git Bash's MinTTY window is expected to hand Node a pipe instead of a terminal (to be confirmed in the Windows E2E), so say where guided setup can run.
+// Git Bash's MinTTY window hands Node a pipe instead of a terminal unless Git for Windows' optional pseudo-console support is
+// on, so say where guided setup can run.
 export function guidedInstallError(platform = process.platform, env = process.env) {
   const message = 'Run sphinx install in a terminal for guided setup, or use --yes with your chosen options. See sphinx install --help.';
   return platform === 'win32' && env.MSYSTEM ? `${message} Git Bash's MinTTY window does not give Node a terminal; run sphinx install from Windows Terminal or PowerShell, or use --yes.` : message;
