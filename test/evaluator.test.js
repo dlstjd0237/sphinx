@@ -925,6 +925,16 @@ test('on Windows only runnable .exe or .com CLIs count as installed', async t =>
   assert.equal(await findExecutable('claude', { PATH: npm }, 'linux'), join(npm, 'claude'));
 });
 
+test('on Windows a quoted PATH entry is searched without its quotes, as spawn() searches it', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'sphinx-quoted-path-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const name of ['claude', 'claude.exe']) await writeFile(join(root, name), 'fake placeholder', { mode: 0o755 });
+  // libuv drops one quote, " or ', from each end of a PATH entry.
+  for (const quoted of [`"${root}"`, `'${root}'`]) assert.equal(await findExecutable('claude', { PATH: quoted }, 'win32'), join(root, 'claude.exe'), quoted);
+  // Elsewhere a quote is part of the directory name, as it always was.
+  assert.equal(await findExecutable('claude', { PATH: `"${root}"` }, 'linux'), null);
+});
+
 test('on Windows an empty PATH asks for the native installers', { skip: process.platform !== 'win32' }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'sphinx-provider-test-'));
   t.after(() => rm(directory, { recursive: true, force: true }));

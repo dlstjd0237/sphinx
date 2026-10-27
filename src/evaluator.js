@@ -336,7 +336,9 @@ const codexError = stdout => {
 // shim and the `.cmd` shim that npm installs need a shell, so they do not count as installed there.
 export async function findExecutable(command, env, platform = process.platform) {
   const names = platform === 'win32' ? [`${command}.com`, `${command}.exe`] : [command];
-  for (const directory of (envValue(env, 'PATH', platform) ?? '').split(delimiter).filter(Boolean)) {
+  // spawn() on Windows (libuv's search_path) drops one quote, " or ', from each end of a PATH entry.
+  const unquote = platform === 'win32' ? entry => entry.replace(/^["']/, '').replace(/["']$/, '') : entry => entry;
+  for (const directory of (envValue(env, 'PATH', platform) ?? '').split(delimiter).map(unquote).filter(Boolean)) {
     for (const name of names) {
       const candidate = resolve(directory, name);
       try {
