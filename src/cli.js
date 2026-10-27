@@ -20,7 +20,7 @@ import { createSessionStore } from './sessions.js';
 import { parseRoute } from './routing.js';
 import { createTerminal, withProgress } from './terminal.js';
 import { HELP, printHelp } from './help.js';
-import { askInstall, askPolicy, createPrompts, questionCapsText, reviewCapsText, routeText, splitList } from './prompts.js';
+import { askInstall, askPolicy, createPrompts, installLanguage, languageQuestion, questionCapsText, reviewCapsText, routeText, splitList } from './prompts.js';
 import { runGitGate } from './git-gate.js';
 import { loadProjectContext, contextWithDescription, contextWithPreferences, ensurePersonalContext, PROJECT_CONTEXT_TEMPLATE } from './repo-context.js';
 import { REVIEWER_PRESETS, presetOptions } from './model-presets.js';
@@ -32,12 +32,12 @@ const CLI_PATH = fileURLToPath(new URL('../bin/sphinx.js', import.meta.url));
 const POLICY_FLAGS = ['branches', 'events', 'level', 'distance', 'remotes'];
 const MODEL_FLAGS = ['preset', 'provider', 'model', 'small', 'medium', 'large', 'allow-paid', 'max-model-calls', 'max-output-tokens', 'cli-billing'];
 const OPTIONS = {
-  install: ['yes', 'repo', 'agents', ...MODEL_FLAGS, 'launch', 'no-launch', ...POLICY_FLAGS],
+  install: ['yes', 'repo', 'agents', 'language', ...MODEL_FLAGS, 'launch', 'no-launch', ...POLICY_FLAGS],
   activate: ['agents', 'json'],
   init: ['yes', 'json', 'context', 'suggest', 'apply', 'github-check', ...POLICY_FLAGS], check: ['json', 'id', 'remote', 'branch', 'staged', 'retry-review'],
   prepare: ['json', 'worker', 'retry'],
   answer: ['json', 'text'], explain: ['json'], dispute: ['json', 'text'], pending: ['json'],
-  status: ['json'], config: ['json', 'distance', 'interface', ...MODEL_FLAGS], doctor: ['json'], auth: ['provider', 'base-url'], uninstall: ['repo'],
+  status: ['json'], config: ['json', 'distance', 'interface', 'language', ...MODEL_FLAGS], doctor: ['json'], auth: ['provider', 'base-url'], uninstall: ['repo'],
   mcp: [], yolo: ['json', 'reason'], usage: ['json'],
 };
 const json = value => console.log(JSON.stringify(value, null, 2));
@@ -135,7 +135,7 @@ export function applyInstallOptions(current, values) {
   }
   if (values['max-model-calls'] !== undefined) config.maxModelCalls = parseModelCalls(values['max-model-calls']);
   if (values['max-output-tokens'] !== undefined) config.maxOutputTokens = parseOutputTokens(values['max-output-tokens']);
-  for (const key of ['provider', 'model', 'level', 'distance', 'interface', 'mode']) if (values[key] !== undefined) config[key] = values[key];
+  for (const key of ['provider', 'model', 'level', 'distance', 'interface', 'language', 'mode']) if (values[key] !== undefined) config[key] = values[key];
   for (const key of ['branches', 'events', 'remotes']) if (values[key] !== undefined) config[key] = splitList(values[key]);
   if (values.provider !== undefined || values.model !== undefined) {
     if (values.provider !== undefined && values.model === undefined) {
@@ -303,9 +303,12 @@ async function installCommand(initial) {
   // Native Windows detects nothing; the guided choice only keeps a Claude Code integration that is already connected.
   const detected = !initial.yes && (initial.agents === undefined || initial.agents === 'auto') ? await (process.platform === 'win32' ? installedAgents() : detectAgents()) : [];
   const installedPlans = initial.yes ? [] : await planProviders().catch(() => []);
-  const values = initial.yes ? initial : await withReadline(ask => askInstall(current, initial, createPrompts({ ask, ui: terminal,
-    select: process.stdin.isTTY && process.stdout.isTTY && process.env.TERM !== 'dumb' ? ask.checkbox : undefined,
-  }), { detectedAgents: detected, hasExistingConfig, installedPlans }));
+  // Without --language, --yes saves the preselected questionnaire language, and guided setup asks for it before askInstall's own questions.
+  const preselected = installLanguage({ hasExistingConfig, current });
+  const values = initial.yes ? { ...initial, language: initial.language ?? preselected } : await withReadline(async ask => {
+    const prompts = createPrompts({ ask, ui: terminal, select: process.stdin.isTTY && process.stdout.isTTY && process.env.TERM !== 'dumb' ? ask.checkbox : undefined });
+    return askInstall(current, { ...initial, language: initial.language ?? await prompts.choose(languageQuestion(preselected)) }, prompts, { detectedAgents: detected, hasExistingConfig, installedPlans });
+  });
   const config = applyInstallOptions(current, values);
   terminal.section('Machine-wide defaults');
   terminal.paragraph('Each repository can override these branches and remotes in .sphinxconfig to match its own production setup.');
@@ -523,7 +526,7 @@ async function statusCommand(command, values) {
 export function parseCommandLine(argv) {
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
     help: { type: 'boolean', short: 'h' }, version: { type: 'boolean', short: 'v' }, json: { type: 'boolean' }, yes: { type: 'boolean' }, repo: { type: 'boolean' }, staged: { type: 'boolean' },
-    preset: { type: 'string' }, provider: { type: 'string' }, model: { type: 'string' }, small: { type: 'string' }, medium: { type: 'string' }, large: { type: 'string' }, level: { type: 'string' }, distance: { type: 'string' }, interface: { type: 'string' }, branches: { type: 'string' }, events: { type: 'string' }, agents: { type: 'string' }, remotes: { type: 'string' },
+    preset: { type: 'string' }, provider: { type: 'string' }, model: { type: 'string' }, small: { type: 'string' }, medium: { type: 'string' }, large: { type: 'string' }, level: { type: 'string' }, distance: { type: 'string' }, interface: { type: 'string' }, language: { type: 'string' }, branches: { type: 'string' }, events: { type: 'string' }, agents: { type: 'string' }, remotes: { type: 'string' },
     remote: { type: 'string' }, branch: { type: 'string' }, id: { type: 'string' }, text: { type: 'string' }, 'allow-paid': { type: 'boolean' },
     context: { type: 'string' }, 'github-check': { type: 'boolean' }, suggest: { type: 'boolean' }, apply: { type: 'string' }, worker: { type: 'boolean' }, retry: { type: 'boolean' }, reason: { type: 'string' }, 'base-url': { type: 'string' }, 'cli-billing': { type: 'string' },
     launch: { type: 'boolean' }, 'no-launch': { type: 'boolean' }, 'retry-review': { type: 'boolean' }, 'max-model-calls': { type: 'string' }, 'max-output-tokens': { type: 'string' },
@@ -596,7 +599,7 @@ export async function main(argv) {
     return result.checks.every(check => check.ok) ? 0 : 1;
   }
   if (command === 'config') {
-    if ([...MODEL_FLAGS, 'distance', 'interface'].some(key => values[key] !== undefined)) {
+    if ([...MODEL_FLAGS, 'distance', 'interface', 'language'].some(key => values[key] !== undefined)) {
       const current = await loadConfig(), previousMaxModelCalls = current.maxModelCalls;
       const config = applyInstallOptions(current, values), maxModelCalls = config.maxModelCalls;
       await saveConfig(config);
@@ -604,6 +607,7 @@ export async function main(argv) {
       if (values.json) { json(result); return 0; }
       const terminal = ui();
       if (values.interface !== undefined) terminal.success(interfaceSummary(config.interface));
+      if (values.language !== undefined) terminal.success(config.language === 'ko' ? 'Questionnaires use Korean.' : 'Questionnaires use English.');
       if (values['max-model-calls'] !== undefined) terminal.success(`Saved machine-wide limit: ${modelLimitText(maxModelCalls)} (previously ${modelLimitText(previousMaxModelCalls)}).`);
       if (values['max-output-tokens'] !== undefined) terminal.success(`Saved output allowance: ${config.maxOutputTokens} tokens per request, including model reasoning. Model calls: ${modelLimitText(maxModelCalls)}.`);
       if (MODEL_FLAGS.some(key => !['max-model-calls', 'max-output-tokens'].includes(key) && values[key] !== undefined)) {
@@ -620,7 +624,7 @@ export async function main(argv) {
     }
     const repo = await git.repository(process.cwd()).catch(() => null), config = await loadConfig(repo?.root);
     if (values.json) { json(config); return 0; }
-    const terminal = ui(); terminal.section('Effective configuration'); terminal.rows([['Global settings', getPaths().config]]);
+    const terminal = ui(); terminal.section('Effective configuration'); terminal.rows([['Global settings', getPaths().config], ['Questionnaire language', config.language === 'ko' ? 'Korean' : 'English']]);
     if (repo) {
       const info = await repositoryConfigInfo(repo.root);
       terminal.rows([['Repository policy', info.exists ? `${info.path}${info.legacy ? ' (legacy)' : ''}` : 'None; global policy applies']]);

@@ -2,6 +2,7 @@ import { parseRoute, questionLimit } from './routing.js';
 import { reviewerTurnLimit } from './reviewer-limits.js';
 import { REVIEWER_PRESETS, presetOptions } from './model-presets.js';
 import { DISTANCES } from './config.js';
+import { systemLanguage } from './i18n.js';
 
 export const routeText = route => `${route.provider}${route.model ? `:${route.model}` : ''}`;
 export const splitList = value => String(value).split(',').map(item => item.trim()).filter(Boolean);
@@ -62,6 +63,24 @@ export function createPrompts({ ask, ui, select }) {
     }
   }
   return { choose, text, multiselect };
+}
+
+/** The questionnaire language install preselects: the saved one on a rerun, the system language on a first setup. */
+export function installLanguage({ hasExistingConfig, current, system = systemLanguage() }) {
+  return hasExistingConfig ? current.language : system;
+}
+
+// Install output stays English; only the choice labels name each language in itself.
+export function languageQuestion(current) {
+  return {
+    title: 'Which language should questionnaires use?',
+    description: 'Questions, feedback, and questionnaire screens use this language. Command output, Git hook messages, and GitHub text stay in English. Change it later with sphinx config --language.',
+    current,
+    choices: [
+      { value: 'en', label: 'English', description: 'Questions and questionnaire screens in English.' },
+      { value: 'ko', label: '한국어 (Korean)', description: 'Questions and questionnaire screens in Korean. Code, file paths, and Git terms stay as they are.' },
+    ],
+  };
 }
 
 const lists = value => { if (!splitList(value).length) throw new Error('Enter at least one comma-separated value.'); if (/\s/.test(splitList(value).join(''))) throw new Error('Use commas between patterns; patterns cannot contain spaces.'); };

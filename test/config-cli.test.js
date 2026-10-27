@@ -14,7 +14,7 @@ async function fixture(t) {
   await mkdir(home); await mkdir(bin);
   const env = { ...process.env, HOME: home, SPHINX_HOME: state, SPHINX_USER_HOME: home,
     GIT_CONFIG_GLOBAL: path.join(home, '.gitconfig'), GIT_CONFIG_NOSYSTEM: '1',
-    OPENROUTER_API_KEY: '', CI: '1', FORCE_COLOR: '1', PATH: `${bin}${path.delimiter}${process.env.PATH}` };
+    OPENROUTER_API_KEY: '', CI: '1', FORCE_COLOR: '1', SPHINX_SYSTEM_LANGUAGE: 'en', PATH: `${bin}${path.delimiter}${process.env.PATH}` };
   for (const key of Object.keys(env)) if (key.startsWith('GIT_CONFIG_KEY_') || key.startsWith('GIT_CONFIG_VALUE_') || ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_CONFIG_COUNT', 'GIT_CONFIG', 'SPHINX_EVALUATOR', 'NO_COLOR'].includes(key)) delete env[key];
   const marker = path.join(base, 'provider-invoked');
   for (const name of ['claude', 'codex']) await writeFile(path.join(bin, name), `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(marker)},'unexpected model invocation');process.exit(88);\n`, { mode: 0o755 });
@@ -308,4 +308,65 @@ test('free routing remains an explicit best-effort choice and help never saves p
   assert.equal(free.config.allowPaid, false);
   for (const route of Object.values(free.config.models)) assert.deepEqual(route, { provider: 'openrouter', model: 'openrouter/free' });  // Free router models spend most of the output budget on reasoning (CRI-58).
   assert.equal(free.config.maxOutputTokens, 16384);
+});
+
+const plain = text => text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\s+/g, ' ');
+const savedLanguage = async f => JSON.parse(await readFile(f.configPath, 'utf8')).language;
+
+test('sphinx config --language ko saves it and says so', async t => {
+  const f = await fixture(t);
+  assert.match(plain(f.ok(['config', '--language', 'ko'])), /Questionnaires use Korean\./);
+  assert.equal(await savedLanguage(f), 'ko');
+  assert.match(plain(f.ok(['config', '--language', 'en'])), /Questionnaires use English\./);
+  assert.equal(await savedLanguage(f), 'en');
+});
+
+test('sphinx config --language fr fails and saves nothing', async t => {
+  const f = await fixture(t);
+  f.ok(['config', '--language', 'ko']);
+  const saved = await readFile(f.configPath, 'utf8');
+  const result = f.run(['config', '--language', 'fr']);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /language must be en, ko/);
+  assert.equal(await readFile(f.configPath, 'utf8'), saved);
+});
+
+test('flagless sphinx config shows the questionnaire language', async t => {
+  const f = await fixture(t);
+  assert.match(plain(f.ok(['config'])), /Questionnaire language English/);
+  f.ok(['config', '--language', 'ko']);
+  assert.match(plain(f.ok(['config'])), /Questionnaire language Korean/);
+});
+
+test('install --yes saves the system language only on a first setup', async t => {
+  const f = await fixture(t);
+  const install = ['install', '--yes', '--preset', 'claude-economy', '--agents', 'none'];
+  f.env.SPHINX_SYSTEM_LANGUAGE = 'ko';
+  f.ok(install);
+  assert.equal(await savedLanguage(f), 'ko');
+  f.env.SPHINX_SYSTEM_LANGUAGE = 'en';
+  f.ok(install);
+  assert.equal(await savedLanguage(f), 'ko', 'a rerun keeps the saved language');
+  f.ok([...install, '--language', 'en']);
+  assert.equal(await savedLanguage(f), 'en');
+});
+
+test('guided install asks the questionnaire language, preselecting the system one on a first setup and the saved one on a rerun, and --language skips it', async t => {
+  const f = await fixture(t);
+  // The preload makes the piped stdin look like a terminal. Every other choice is given, so one Enter answers the only question.
+  const looksLikeTerminal = "data:text/javascript,Object.defineProperty(process.stdin,'isTTY',{value:true})";
+  const guided = (...args) => spawnSync(process.execPath, ['--import', looksLikeTerminal, CLI, 'install', '--no-launch', '--agents', 'none', '--preset', 'claude-economy', '--events', 'pre-push', '--branches', 'main', '--remotes', '*', '--level', 'standard', '--distance', 'high', ...args], { cwd: f.base, env: f.env, encoding: 'utf8', timeout: 10000, input: '\n' });
+  f.env.SPHINX_SYSTEM_LANGUAGE = 'ko';
+  const first = guided();
+  assert.equal(first.status, 0, first.stderr);
+  assert.match(plain(first.stdout), /Which language should questionnaires use\?.*1\. English .*2\. 한국어 \(Korean\) \(default\)/);
+  assert.equal(await savedLanguage(f), 'ko');
+  f.env.SPHINX_SYSTEM_LANGUAGE = 'en';
+  const rerun = guided();
+  assert.equal(rerun.status, 0, rerun.stderr);
+  assert.equal(await savedLanguage(f), 'ko', 'Enter keeps the saved language, not the system one');
+  const flagged = guided('--language', 'en');
+  assert.equal(flagged.status, 0, flagged.stderr);
+  assert.doesNotMatch(flagged.stdout, /Which language/);
+  assert.equal(await savedLanguage(f), 'en');
 });

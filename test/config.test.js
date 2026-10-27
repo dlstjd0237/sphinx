@@ -194,7 +194,7 @@ test('policy hashes ignore object-key ordering and cover only what a check asks'
   // Which operations and files are checked, and how deep: these change the hash.
   const assessment = { version: 2, enabled: false, mode: 'other', events: ['pre-commit'], branches: ['release/*'], remotes: ['upstream'], exclude: ['private/**'], level: 'relaxed', distance: 'low', routing: { ...original.routing, largeMinLines: 200 } };
   // Reviewer routes and run settings do not, so changing them keeps prepared checks and passes.
-  const run = { provider: 'claude', model: 'another-model', models: { ...original.models, large: { provider: 'claude', model: 'sonnet' } }, audit: 'all', maxContextBytes: 50000, timeoutSeconds: 60, receiptHours: 1, maxModelCalls: 5, maxOutputTokens: 8192, allowPaid: true, cliBilling: 'api', agentMaxTurns: 4, toolResultBytes: 8000, backgroundPreparation: false, preparationDebounceMs: 0, workingContext: false, interface: 'terminal', github: { status: false, comment: true, answers: true } };
+  const run = { provider: 'claude', model: 'another-model', models: { ...original.models, large: { provider: 'claude', model: 'sonnet' } }, audit: 'all', maxContextBytes: 50000, timeoutSeconds: 60, receiptHours: 1, maxModelCalls: 5, maxOutputTokens: 8192, allowPaid: true, cliBilling: 'api', agentMaxTurns: 4, toolResultBytes: 8000, backgroundPreparation: false, preparationDebounceMs: 0, workingContext: false, interface: 'terminal', language: 'ko', github: { status: false, comment: true, answers: true } };
   // A new setting must be placed in one group or the other.
   assert.deepEqual([...Object.keys(assessment), ...Object.keys(run)].sort(), Object.keys(original).sort());
   for (const [key, value] of Object.entries(assessment)) assert.notEqual(policyHash({ ...original, [key]: value }), policyHash(original), key);
@@ -252,6 +252,18 @@ test('understanding distance defaults to mixed, accepts high and low, and a repo
   t.after(() => rm(dir, { recursive: true, force: true }));
   await writeFile(join(dir, '.sphinxconfig'), JSON.stringify({ version: 1, distance: 'low' }));
   assert.equal((await loadConfig(dir, { SPHINX_HOME: join(dir, 'home') })).distance, 'low');
+});
+
+test('language defaults to en and accepts only en and ko', () => {
+  assert.equal(DEFAULT_CONFIG.language, 'en');
+  assert.equal(validateConfig({ ...structuredClone(DEFAULT_CONFIG), language: 'ko' }).language, 'ko');
+  for (const value of ['ja', 'KO']) assert.throws(() => validateConfig({ ...structuredClone(DEFAULT_CONFIG), language: value }), /language must be en, ko/);
+});
+
+test('.sphinxconfig cannot set language', async t => {
+  const { repo, env } = await fixture(t);
+  await writeJson(join(repo, '.sphinxconfig'), { language: 'ko' });
+  await assert.rejects(loadConfig(repo, env), /cannot set language/);
 });
 
 // A rename that fails with `code` for its first `failures` calls (Infinity: always), then succeeds.

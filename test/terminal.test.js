@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { colorEnabled, createTerminal, stripAnsi, wrapText, withProgress, formatError, SPHINX } from '../src/terminal.js';
 import { printHelp, HELP } from '../src/help.js';
-import { askInstall, askPolicy, createPrompts } from '../src/prompts.js';
+import { askInstall, askPolicy, createPrompts, installLanguage, languageQuestion } from '../src/prompts.js';
 import { applyInstallOptions } from '../src/cli.js';
 import { DEFAULT_CONFIG } from '../src/config.js';
 import { presetOptions } from '../src/model-presets.js';
@@ -402,4 +402,25 @@ test('on Windows, guided setup recommends a reviewer CLI only when Windows can s
   for (const seen of [codexOnly, await modelPicker(['claude'], 'win32'), await modelPicker([], 'linux'), await modelPicker([], 'darwin')]) assert.ok(!seen.description.includes('none was found'), seen.description);
   // Other systems still trust the agent the user selected.
   assert.equal((await modelPicker([], 'linux')).current, 'claude-economy');
+});
+
+test('install preselects the system language only for a first setup', () => {
+  assert.equal(installLanguage({ hasExistingConfig: false, current: { language: 'en' }, system: 'ko' }), 'ko');
+  assert.equal(installLanguage({ hasExistingConfig: true, current: { language: 'en' }, system: 'ko' }), 'en');
+});
+
+test('languageQuestion offers English and Korean with the given default', async () => {
+  assert.deepEqual(languageQuestion('ko'), {
+    title: 'Which language should questionnaires use?',
+    description: 'Questions, feedback, and questionnaire screens use this language. Command output, Git hook messages, and GitHub text stay in English. Change it later with sphinx config --language.',
+    current: 'ko',
+    choices: [
+      { value: 'en', label: 'English', description: 'Questions and questionnaire screens in English.' },
+      { value: 'ko', label: '한국어 (Korean)', description: 'Questions and questionnaire screens in Korean. Code, file paths, and Git terms stay as they are.' },
+    ],
+  });
+  // Enter takes the given default.
+  const output = capture();
+  assert.equal(await createPrompts({ ui: output.ui, ask: async () => '' }).choose(languageQuestion('en')), 'en');
+  assert.match(output.text(), /1\. English \(default\)/);
 });
