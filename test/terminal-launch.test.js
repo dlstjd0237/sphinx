@@ -5,9 +5,12 @@ import { tmpdir } from 'node:os';
 import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { terminalCommand, launchCheckpointTerminal, checkpointTerminalStatus, waitForCheckpointTerminal, runCheckpointTerminal, createTerminalEnvironmentBridge, readTerminalEnvironment, claimCheckpointDialog, finishCheckpointDialog } from '../src/terminal-launch.js';
 import { terminalHandoff } from '../src/lifecycle-integrations.js';
+import { EN } from '../src/i18n.js';
+import { KO } from '../src/i18n-ko.js';
 
 const ID = 'a'.repeat(64);
 const json = async file => JSON.parse(await readFile(file, 'utf8'));
@@ -351,4 +354,26 @@ test('an unfinished check keeps its window open until Enter, after recording the
     assert.equal(recordedFirst !== undefined, paused, `${status} ${paused ? 'waits' : 'closes'}`);
     if (paused) assert.equal(recordedFirst, 'pending', 'Git sees the result before the prompt');
   }
+});
+
+test('the dedicated window speaks the questionnaire language, and English when the settings cannot be read', async t => {
+  // The worker itself, run with piped input: it records the check as unavailable and says it is incomplete.
+  const worker = fileURLToPath(new URL('../src/terminal-worker.js', import.meta.url));
+  for (const [settings, line] of [[JSON.stringify({ language: 'ko' }), KO['terminal.window.incomplete']], ['{ not json', EN['terminal.window.incomplete']], [null, EN['terminal.window.incomplete']]]) {
+    const f = await fixture(t);
+    await launchCheckpointTerminal({ ...f.options, launch: async () => true });
+    if (settings !== null) await writeFile(path.join(f.home, 'config.json'), settings);
+    const run = spawnSync(process.execPath, [worker, f.recordFile, (await json(f.recordFile)).token], { env: { ...process.env, ...f.env, PATH: process.env.PATH }, encoding: 'utf8', input: '', timeout: 20000 });
+    assert.equal(run.stdout, `\n${line}\n`, `${settings}: ${run.stderr}`);
+    assert.equal(run.status, 1);
+    assert.equal((await json(f.recordFile)).status, 'unavailable');
+  }
+  // The prompt that keeps an unfinished check's window open gets the language beside its output stream.
+  const f = await fixture(t);
+  await launchCheckpointTerminal({ ...f.options, launch: async () => true });
+  const record = await json(f.recordFile), paused = [];
+  await runCheckpointTerminal({ recordFile: f.recordFile, token: record.token, env: f.env, isTTY: true, language: 'ko',
+    pause: async (...args) => { paused.push(args); },
+    spawnImpl: () => { const child = new EventEmitter(); child.pid = 1234567; setImmediate(() => child.emit('exit', 1)); return child; } });
+  assert.deepEqual(paused, [[process.stdout, 'ko']]);
 });

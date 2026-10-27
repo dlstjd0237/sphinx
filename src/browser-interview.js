@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { DISTANCES, loadConfig, policyHash, readJson, repositoryConfigInfo, saveConfig } from './config.js';
 import { revalidateSnapshot, repositoryName } from './git.js';
-import { createSessionStore, savedDraft } from './sessions.js';
+import { createSessionStore, fallbackText, savedDraft } from './sessions.js';
 import { prepareInteractiveCheck, isRateLimit, isCliFailure, switchChoices, PLAN_NAMES } from './check-recovery.js';
 import { claimCheckpointDialog, finishCheckpointDialog, waitForCheckpointTerminal } from './terminal-launch.js';
 import { browserPage } from './browser-page.js';
@@ -47,9 +47,6 @@ const OPERATION_KEYS = {
   },
 };
 const operationKeys = event => OPERATION_KEYS[operation(event)];
-// Sphinx's own fallback sentences: a session stores the English text beside a code, and the page draws the code.
-const FALLBACK_KEYS = { flagged: 'common.fallback.flagged', empty: 'common.fallback.empty', documentation: 'common.fallback.documentation' };
-const fallback = (code, text) => FALLBACK_KEYS[code] ? msg(FALLBACK_KEYS[code]) : text;
 
 /**
  * A quiet macOS notification that questions (or the Continue choice) are waiting.
@@ -125,7 +122,7 @@ function publicFields(state) {
     // A pass held from an earlier operation shows no question, so its last grade's feedback would read
     // out of context. A pass made on this page is held too, but its transcript already shows that feedback.
     // A stored state has no feedbackCode, and its feedback passes through as it is.
-    ...(state.feedback && !state.held ? { feedback: fallback(state.feedbackCode, state.feedback) } : {}),
+    ...(state.feedback && !state.held ? { feedback: fallbackText(state.feedbackCode, state.feedback) } : {}),
   };
 }
 
@@ -580,7 +577,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
         });
         if (action.action === 'saved') {
           visible = action.visible;
-          if (visible.feedback && visible.feedback !== shown.feedback) say({ role: 'sphinx', kind: 'feedback', text: fallback(visible.feedbackCode, visible.feedback) });
+          if (visible.feedback && visible.feedback !== shown.feedback) say({ role: 'sphinx', kind: 'feedback', text: fallbackText(visible.feedbackCode, visible.feedback) });
           await refreshScore(request.repoRoot, operationEnv).catch(() => {});
           continue;
         }
@@ -611,7 +608,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
           })).finally(() => { dropDraft(); grading = false; });
           settle('graded');
           await refreshScore(request.repoRoot, operationEnv).catch(() => {});
-          if (visible.feedback) say({ role: 'sphinx', kind: 'feedback', text: fallback(visible.feedbackCode, visible.feedback) });
+          if (visible.feedback) say({ role: 'sphinx', kind: 'feedback', text: fallbackText(visible.feedbackCode, visible.feedback) });
           // Without a usable new question no new bubble appears, so say that the same one stays open.
           if (visible.status !== 'passed' && visible.question?.id === action.questionId) say({ role: 'sphinx', kind: 'notice', text: msg('server.transcript.sameQuestion') });
         } catch (error) {
@@ -636,7 +633,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
       }
       localSignal.throwIfAborted(); await validate(session.snapshot, config);
       const keys = operationKeys(session.snapshot.event);
-      const result = visible.noQuestionReason ? msg('server.result.noQuestions', { reason: fallback(visible.noQuestionCode, visible.noQuestionReason) }) : msg('server.result.passed');
+      const result = visible.noQuestionReason ? msg('server.result.noQuestions', { reason: fallbackText(visible.noQuestionCode, visible.noQuestionReason) }) : msg('server.result.passed');
       // Held when this page opened, the pass was made for an earlier push or commit that did not
       // go through; nothing else is asked. (A pass made here is held too, until Git sees Continue.)
       const earlier = session.status === 'passed' && session.held && msg(visible.noQuestionReason ? keys.noQuestionsEarlier : keys.passedEarlier);

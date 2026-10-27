@@ -2,29 +2,30 @@ import { parseRoute, questionLimit } from './routing.js';
 import { reviewerTurnLimit } from './reviewer-limits.js';
 import { REVIEWER_PRESETS, presetOptions } from './model-presets.js';
 import { DISTANCES } from './config.js';
-import { localize, systemLanguage } from './i18n.js';
+import { localize, systemLanguage, t } from './i18n.js';
 
 export const routeText = route => `${route.provider}${route.model ? `:${route.model}` : ''}`;
 export const splitList = value => String(value).split(',').map(item => item.trim()).filter(Boolean);
 export const questionCapsText = level => ['small', 'medium', 'large'].map(tier => `${tier} ${questionLimit(level, tier)}`).join(', ');
 export const reviewCapsText = config => ['small', 'medium', 'large'].map(tier => `${tier} ${Math.min(config.agentMaxTurns ?? 8, reviewerTurnLimit(tier, config.agentMaxTurns ?? 8) + 2)}`).join(', ');
 
-// language draws the message refs a menu may carry (the review recovery menu); its own words stay English for now.
+// language draws a menu in the questionnaire language: the message refs it carries (the review recovery menu) and the
+// menu's own words. Install and init pass none, so their menus stay English.
 export function createPrompts({ ask, ui, select, language = 'en' }) {
   async function choose(prompt) {
     const { title, description, choices, current, requireSelection = false } = localize(prompt, language);
     ui.section(title); if (description) ui.paragraph(description);
     const selected = requireSelection ? -1 : Math.max(0, choices.findIndex(choice => choice.value === current));
     ui.blank();
-    ui.rows(choices.map((choice, index) => [`${index + 1}. ${choice.label}${index === selected ? ' (default)' : ''}`, choice.description]));
+    ui.rows(choices.map((choice, index) => [`${index + 1}. ${index === selected ? t(language, 'terminal.choose.defaultLabel', { label: choice.label }) : choice.label}`, choice.description]));
     for (;;) {
-      const answer = (await ask(selected < 0 ? '\nChoose: ' : `\nChoose [${selected + 1}]: `)).trim();
+      const answer = (await ask(`\n${selected < 0 ? t(language, 'terminal.choose.prompt') : t(language, 'terminal.choose.promptDefault', { number: selected + 1 })} `)).trim();
       if (!answer && selected >= 0) return choices[selected].value;
       const exact = choices.find(choice => choice.value.toLowerCase() === answer.toLowerCase());
       const number = /^\d+$/.test(answer) ? Number(answer) : 0;
       if (exact) return exact.value;
       if (number >= 1 && number <= choices.length) return choices[number - 1].value;
-      ui.warning(`Enter a number from 1 to ${choices.length}${selected < 0 ? '.' : `, or press Enter for ${choices[selected].label}.`}`);
+      ui.warning(selected < 0 ? t(language, 'terminal.choose.invalid', { max: choices.length }) : t(language, 'terminal.choose.invalidDefault', { max: choices.length, label: choices[selected].label }));
     }
   }
   async function text({ title, description, current, validate = value => value }) {

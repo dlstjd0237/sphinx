@@ -9,6 +9,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { activationAdvice, agentSummary, guidedInstallError, interfaceSummary } from '../src/cli.js';
 import { getPaths } from '../src/config.js';
+import { KO } from '../src/i18n-ko.js';
 
 const CLI = fileURLToPath(new URL('../bin/sphinx.js', import.meta.url));
 const WINDOWS_NOTE = 'Sphinx does not open clients on Windows. Start a new Claude Code session in this repository to load Sphinx.';
@@ -750,4 +751,24 @@ test('a documentation-only push goes through with no questionnaire and no model 
   assert.equal(pushed.status, 0, pushed.stderr);
   assert.match(pushed.stderr, /documentation-only change to refs\/heads\/main; no questions needed/);
   assert.equal((await f.calls()).length, before, 'No model was called');
+});
+
+test('sphinx check --json keeps English Sphinx text in a Korean setup', { timeout: 30000 }, async t => {
+  const f = await fixture(t);
+  f.git('push', '-u', 'origin', 'main');
+  f.cli('install', '--yes', '--provider', 'claude', '--agents', 'none', '--language', 'ko');
+  await writeFile(path.join(f.repo, 'README.md'), '# Queue\n\nUsage notes.\n');
+  f.git('add', 'README.md'); f.git('commit', '-qm', 'Docs');
+  // Sphinx's own sentence in JSON is English, with the code a screen draws in the questionnaire language.
+  const raw = f.cli('check', '--json');
+  assert.doesNotMatch(raw, /[\u{AC00}-\u{D7A3}]/u, raw);
+  const result = JSON.parse(raw);
+  assert.equal(result.status, 'passed');
+  assert.equal(result.noQuestionReason, 'Documentation-only change.');
+  assert.equal(result.noQuestionCode, 'documentation');
+  assert.deepEqual(f.cliJson('check', '--remote', 'not-configured', '--branch', 'feature/skip'), { status: 'not-required' });
+  // The same command without --json speaks Korean.
+  const human = f.cli('check', '--remote', 'not-configured', '--branch', 'feature/skip');
+  assert.ok(human.includes(KO['terminal.check.notRequired']), human);
+  assert.deepEqual(await f.calls(), [], 'No model was called');
 });

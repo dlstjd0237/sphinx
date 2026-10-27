@@ -16,7 +16,7 @@ import { install, uninstall, doctor, dispatchHook, installedAgents, detectAgents
 import { activateIntegrations, WINDOWS_ACTIVATION_NOTE } from './activation.js';
 import { checkbox } from './checkbox.js';
 import { agentHook } from './agent.js';
-import { createSessionStore } from './sessions.js';
+import { createSessionStore, fallbackText } from './sessions.js';
 import { parseRoute } from './routing.js';
 import { createTerminal, withProgress } from './terminal.js';
 import { HELP, printHelp } from './help.js';
@@ -25,7 +25,7 @@ import { runGitGate } from './git-gate.js';
 import { loadProjectContext, contextWithDescription, contextWithPreferences, ensurePersonalContext, PROJECT_CONTEXT_TEMPLATE } from './repo-context.js';
 import { REVIEWER_PRESETS, presetOptions } from './model-presets.js';
 import { modelUsageRef, modelUsageText, modelLimitText, readUsage, summarizeUsage, printUsage, usageDir } from './usage.js';
-import { localize } from './i18n.js';
+import { localize, t } from './i18n.js';
 import { toggleYolo, yoloStatus, recentOverrides, recordOverride } from './overrides.js';
 import { runTerminalCheck } from './terminal-check.js';
 
@@ -425,23 +425,23 @@ async function githubCheckCommand(values) {
   return 0;
 }
 
-// language draws the message refs this output carries; its own words stay English for now.
-function printSession(session, terminal = ui(), language = 'en') {
+const TIERS = { small: 'terminal.session.tierSmall', medium: 'terminal.session.tierMedium', large: 'terminal.session.tierLarge' };
+/** What sphinx answer, explain and dispute print, in the questionnaire language. Their --json output stays English. */
+export function printSession(session, terminal = ui(), language = 'en') {
   if (session.feedback) {
-    terminal.section(session.verdict === 'incorrect' ? 'Review this concept' : session.verdict === 'ambiguous' ? 'Clarification needed' : 'Feedback'); terminal.paragraph(localize(session.feedback, language));
+    terminal.section(t(language, session.verdict === 'incorrect' ? 'terminal.session.feedbackIncorrect' : session.verdict === 'ambiguous' ? 'terminal.session.feedbackAmbiguous' : 'terminal.session.feedback'));
+    terminal.paragraph(localize(fallbackText(session.feedbackCode, session.feedback), language));
   }
   if (session.status === 'passed') {
-    terminal.blank(); terminal.success('Understanding check complete.');
-    terminal.paragraph(process.env.SPHINX_WAITING_GIT === '1'
-      ? "Approval saved. Return to the original Git output for the operation's result."
-      : 'Approval saved for this exact change and destination. A waiting push or commit goes through once you choose Continue in its questionnaire.');
+    terminal.blank(); terminal.success(t(language, 'terminal.done.complete'));
+    terminal.paragraph(t(language, process.env.SPHINX_WAITING_GIT === '1' ? 'terminal.session.approvalSavedWaiting' : 'terminal.done.approvalSaved'));
     return;
   }
-  terminal.blank(); terminal.note(`${session.route.tier} change · ${routeText(session.route)} · ${localize(modelUsageRef(session.usage, session.tokens), language)}`);
-  if (!session.question) { terminal.paragraph('Assessment queued. Run sphinx check to begin.'); return; }
-  terminal.section(`Question ${session.progress.completed + 1} of ${session.progress.total}`); terminal.paragraph(session.question.prompt);
+  terminal.blank(); terminal.note(`${t(language, TIERS[session.route.tier])} · ${routeText(session.route)} · ${localize(modelUsageRef(session.usage, session.tokens), language)}`);
+  if (!session.question) { terminal.paragraph(t(language, 'terminal.session.queued')); return; }
+  terminal.section(t(language, 'terminal.question.number', { number: session.progress.completed + 1, total: session.progress.total })); terminal.paragraph(session.question.prompt);
   if (session.question.choices.length) { terminal.blank(); terminal.rows(session.question.choices.map((choice, index) => [`${index + 1}.`, choice])); }
-  terminal.blank(); terminal.note('Give a prediction and a short reason. /learn for help · /dispute <reason> · /quit to save progress');
+  terminal.blank(); terminal.note(t(language, 'terminal.session.answerHint'));
 }
 
 async function checkCommand(values) {
@@ -454,7 +454,7 @@ async function checkCommand(values) {
   if (session && session.snapshot.repoRoot !== repo.root) throw new Error('This checkpoint belongs to a different repository.');
   if (!session) {
     const snapshot = values.staged ? await git.commitSnapshot({ cwd: repo.root, config }) : await git.manualSnapshot({ cwd: repo.root, config, remote: values.remote, branch: values.branch });
-    if (!snapshot) { if (values.json) json({ status: 'not-required' }); else ui().success('No assessment required by the current policy.'); return 0; }
+    if (!snapshot) { if (values.json) json({ status: 'not-required' }); else ui().success(t(config.language, 'terminal.check.notRequired')); return 0; }
     session = await store.ensure(snapshot, config);
   }
   if (!values.json && !process.stdin.isTTY) throw new Error('Use sphinx check --json from a coding agent, or run in an interactive terminal.');
@@ -472,8 +472,8 @@ async function checkCommand(values) {
       await store.retryReview(session.id, config, { signal });
       signal.throwIfAborted();
       terminal.note(config.maxModelCalls === null
-        ? 'Resuming the review with no model-call limit. Previous usage remains counted.'
-        : `Starting a new review attempt with up to ${config.maxModelCalls} additional model calls, including grading. Previous usage remains counted.`);
+        ? t(config.language, 'terminal.check.retryUnlimited')
+        : t(config.language, 'terminal.check.retryLimited', { calls: config.maxModelCalls }));
     }
     return runTerminalCheck({
       store, session: await store.read(session.id), config, ask, terminal, signal, waitingGit, more,
@@ -660,7 +660,7 @@ export async function main(argv) {
     const { repo, config } = await repoConfig(), existing = await store.read(id);
     if (existing.snapshot.repoRoot !== repo.root) throw new Error('This checkpoint belongs to a different repository.');
     const learn = command === 'explain', dispute = command === 'dispute';
-    const result = await withProgress(learn ? 'Preparing an explanation' : dispute ? 'Reviewing the question' : 'Checking your reasoning', () => store.answer(id, learn ? 'I do not know. Explain this concept and give me a different scenario to apply it to.' : values.text, config, { learn, dispute }), { enabled: !values.json });
+    const result = await withProgress(t(config.language, learn ? 'terminal.spinner.explaining' : dispute ? 'terminal.spinner.reviewingQuestion' : 'terminal.spinner.checking'), () => store.answer(id, learn ? 'I do not know. Explain this concept and give me a different scenario to apply it to.' : values.text, config, { learn, dispute }), { enabled: !values.json });
     if (values.json) json(result); else printSession(result, ui(), config.language); return 0;
   }
 }

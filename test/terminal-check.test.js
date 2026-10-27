@@ -15,14 +15,17 @@ import { createSessionStore } from '../src/sessions.js';
 import { createPrompts } from '../src/prompts.js';
 import { activityText } from '../src/reviewer.js';
 import { MODEL_OUTPUT_ERRORS } from '../src/evaluator.js';
-import { join, localize, msg } from '../src/i18n.js';
+import { modelUsageRef } from '../src/usage.js';
+import { VERSION } from '../src/version.js';
+import { EN, join, localize, msg, t as tx } from '../src/i18n.js';
+import { KO } from '../src/i18n-ko.js';
 
 const question = (id, prompt, extra = {}) => ({ id, prompt, choices: [], ...extra });
-function harness({ answers, results, waitingGit = false, more = false, started, event = 'pre-push', width = 80, held = false, prompt = 'What happens on redelivery?\u001b[2J' }) {
+function harness({ answers, results, waitingGit = false, more = false, started, event = 'pre-push', width = 80, held = false, prompt = 'What happens on redelivery?\u001b[2J', language = 'en', draft }) {
   let output = '';
   const stream = new Writable({ write(chunk, _e, done) { output += chunk; done(); } });
   const q1 = question('q1', prompt, { evidence: [{ path: 'src/jobs/charge.js', reason: 'PRIVATE_REASON' }] });
-  const session = { id: 'x', questions: [q1], ...(held ? { status: 'passed', held: { at: '2026-10-23T00:00:00.000Z' } } : {}), route: { provider: 'claude', model: 'sonnet' }, snapshot: { repoRoot: '/work/billing', event, target: { remote: 'origin', ref: 'refs/heads/main' }, stats: { files: 2, additions: 10, deletions: 1 } } };
+  const session = { id: 'x', index: 0, questions: [q1], ...(held ? { status: 'passed', held: { at: '2026-10-23T00:00:00.000Z' } } : {}), ...(draft ? { draft: { questionId: 'q1', ...draft } } : {}), route: { provider: 'claude', model: 'sonnet' }, snapshot: { repoRoot: '/work/billing', event, target: { remote: 'origin', ref: 'refs/heads/main' }, stats: { files: 2, additions: 10, deletions: 1 } } };
   const sent = [], skips = [], prompts = [], starts = [];
   const store = {
     start: async (_id, _c, options) => { starts.push(options); return started ?? ({ status: 'active', question: q1, progress: { completed: 0, total: 1 } }); },
@@ -30,9 +33,36 @@ function harness({ answers, results, waitingGit = false, more = false, started, 
     answer: async (_id, text, _c, options) => { sent.push({ text, ...options }); const result = results.shift(); if (result instanceof Error) throw result; return result; },
   };
   const ask = async prompt => { prompts.push(prompt); if (!answers.length) throw new Error(`Unexpected prompt: ${prompt}`); return answers.shift(); };
-  const run = () => runTerminalCheck({ store, session, config: DEFAULT_CONFIG, ask, terminal: createTerminal({ stream, env: { NO_COLOR: '1' }, width }), stream, waitingGit, more, env: { SPHINX_HOME: '/nonexistent-sphinx-home' }, validate: async () => {}, choose: async () => 'pause', skip: async reason => skips.push(reason) });
+  const run = () => runTerminalCheck({ store, session, config: { ...DEFAULT_CONFIG, language }, ask, terminal: createTerminal({ stream, env: { NO_COLOR: '1' }, width }), stream, waitingGit, more, env: { SPHINX_HOME: '/nonexistent-sphinx-home' }, validate: async () => {}, choose: async () => 'pause', skip: async reason => skips.push(reason) });
   return { run, sent, skips, prompts, starts, output: () => output, q1 };
 }
+
+// sphinx check after a review that failed, wired the way cli.js wires it: the real session store, and the recovery menu
+// that createPrompts draws in the questionnaire language.
+const failure = (message, code, extra = {}) => () => Object.assign(new Error(message), { code, ...extra });
+const RECOVERY = {
+  switched: { planProviders: ['claude'], answers: ['1', ''], error: failure('OpenRouter HTTP 429 (code: 429; error_type: rate_limit_exceeded).', 'OPENROUTER_PROVIDER_ERROR', { status: 429, errorType: 'rate_limit_exceeded' }) },
+  extended: { maxModelCalls: 3, answers: ['1', ''], error: failure('The reviewer did not retain changed-code evidence.', 'INSUFFICIENT_EVIDENCE') },
+  setup: { error: failure('API key was rejected.', 'OPENROUTER_PROVIDER_ERROR', { status: 401, errorType: 'authentication' }) },
+};
+async function recoveryRun(t, { language = 'en', width = 80, maxModelCalls = 10, planProviders = [], answers = [], error }) {
+  const home = await mkdtemp(path.join(tmpdir(), 'sphinx-terminal-recovery-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const env = { SPHINX_HOME: home, SPHINX_USER_HOME: home };
+  const config = { ...structuredClone(DEFAULT_CONFIG), maxModelCalls, language };
+  const snapshot = { id: 'b'.repeat(64), repoRoot: '/test/repo', event: 'pre-push', target: { ref: 'refs/heads/main' }, files: ['app.js'], stats: { additions: 5, deletions: 1, files: 1 } };
+  const store = createSessionStore({ env, validate: async () => {}, generate: async (_s, _c, options) => { await options.beforeCall(); throw error(); } });
+  await store.ensure(snapshot, config);
+  let output = '';
+  const stream = new Writable({ write(chunk, _e, done) { output += chunk; done(); } });
+  const terminal = createTerminal({ stream, env: { NO_COLOR: '1' }, width });
+  const prompts = [], queue = [...answers];
+  const ask = async prompt => { prompts.push(prompt); return queue.length ? queue.shift() : ''; };
+  const code = await runTerminalCheck({ store, session: await store.read(snapshot.id), config, ask, terminal, stream, planProviders, env, validate: async () => {}, choose: createPrompts({ ask, ui: terminal, language }).choose });
+  return { code, output, prompts };
+}
+const squash = text => text.replace(/\s+/gu, ' ');
+const overflowing = (output, width = 80) => output.split('\n').filter(line => displayWidth(line) > width);
 
 test('the terminal check shows the change, asks, grades, and passes', async () => {
   const done = { status: 'passed', question: null, progress: { completed: 1, total: 1 }, verdict: 'correct', feedback: '' };
@@ -245,7 +275,8 @@ test('a failed grade keeps the question open instead of ending the check; cancel
   const answers = ['/learn', 'It charges twice'];
   const code = await runTerminalCheck({ store, session: { id: 'x', questions: [failing.q1], route: {}, snapshot: { repoRoot: '/r', target: { ref: 'refs/heads/main' } } }, config: DEFAULT_CONFIG, ask: async () => answers.shift(), terminal: createTerminal({ stream, env: { NO_COLOR: '1' }, width: 80 }), stream, env: { SPHINX_HOME: '/nonexistent' }, validate: async () => {}, choose: async () => 'pause' });
   assert.equal(code, 0, 'the check carried on and passed');
-  assert.match(output, /That didn't go through: The grader's reply couldn't be used, so no explanation is shown\./);
+  // The warning is wider than the terminal, so it wraps under its own text.
+  assert.match(output, /That didn't go through: The grader's reply couldn't be used, so no\n {4}explanation is shown\./);
   assert.match(output, /Your progress is kept/);
   const cancelled = Object.assign(new Error('cancelled'), { code: 'SPHINX_CANCELLED' });
   const stopping = { ...store, answer: async () => { throw cancelled; } };
@@ -255,7 +286,6 @@ test('a failed grade keeps the question open instead of ending the check; cancel
 test('no screen output contains [object Object] or message references', async t => {
   // The spinner redraws on an interval; a mocked one draws the progress line when the review reports it.
   t.mock.timers.enable({ apis: ['setInterval'] });
-  const squash = text => text.replace(/\s+/gu, ' ');
   for (const language of ['en', 'ko']) {
     const home = await mkdtemp(path.join(tmpdir(), 'sphinx-terminal-refs-'));
     t.after(() => rm(home, { recursive: true, force: true }));
@@ -290,8 +320,8 @@ test('no screen output contains [object Object] or message references', async t 
     const expected = [
       ...['common.recovery.reviewFailedTitle', 'common.recovery.chooseHow', 'common.recovery.retryWithin', 'common.recovery.pauseLabel', 'common.recovery.pauseDescription'].map(key => msg(key)),
       msg('common.recovery.callsRemain', { remaining: 9, reserve: 1 }), msg('common.recovery.usedSoFar', { usage }),
-      join(['Reviewing', msg('common.progress.readingFile', { path: 'app.js' })], ' · '),
-      join(["That didn't go through", msg('common.grading.unusableAnswer')], ': '),
+      msg('terminal.spinner.reviewingProgress', { activity: msg('common.progress.readingFile', { path: 'app.js' }) }),
+      msg('terminal.error.notThrough', { message: msg('common.grading.unusableAnswer') }),
     ].map(ref => localize(ref, language));
     for (const text of expected) {
       assert.ok(squash(output).includes(squash(text)), `${language}: ${text}\n${output}`);
@@ -321,27 +351,40 @@ test('a saved ungraded answer is shown once and Enter sends it again without ret
 test('the header and spinner fit the width with wide text', async t => {
   await t.test('the header pads the gap before its label by display columns', () => {
     const session = { snapshot: { repoRoot: '/work/billing', target: { remote: 'origin', ref: 'refs/heads/main' }, stats: { files: 2, additions: 10, deletions: 1 } }, route: { provider: 'claude', model: 'sonnet' } };
+    const header = (width, language, score = null) => {
+      const lines = [];
+      const terminal = { ...createTerminal({ stream: { write() {} }, env: { NO_COLOR: '1' }, width }), language, line: text => lines.push(text) };
+      printHeader(terminal, { session, score });
+      return lines;
+    };
     for (const width of [50, 80, 100]) {
-      for (const label of [undefined, '이해도 점검']) {
-        const lines = [];
-        const terminal = { ...createTerminal({ stream: { write() {} }, env: { NO_COLOR: '1' }, width }), line: text => lines.push(text) };
-        printHeader(terminal, { session, score: null, label });
-        assert.equal(displayWidth(lines[1]), width, `${label ?? 'default label'} at ${width}: ${lines[1]}`);
-        assert.ok(lines[1].endsWith(label ?? 'understanding check'), lines[1]);
+      for (const language of ['en', 'ko']) {
+        const [, line] = header(width, language);
+        assert.equal(displayWidth(line), width, `${language} at ${width}: ${line}`);
+        assert.ok(line.endsWith(tx(language, 'terminal.header.title')), line);
       }
     }
+    // '이해도 점검' is 11 columns in 6 UTF-16 units: at 80 the gap before it is 51 spaces, where English has 43.
+    assert.equal(header(80, 'ko')[1], `  ◆ sphinx v${VERSION}${' '.repeat(80 - displayWidth(`  ◆ sphinx v${VERSION}`) - 11)}이해도 점검`);
+    assert.equal(header(80, 'en')[1], `  ◆ sphinx v${VERSION}${' '.repeat(80 - displayWidth(`  ◆ sphinx v${VERSION}`) - 19)}understanding check`);
+    // The change's facts and the score line are drawn in the questionnaire language too.
+    const korean = header(80, 'ko', { calibrating: false, accuracy: 80, streak: 3, recent: [true, false, true] });
+    assert.equal(korean[2], '  billing → origin/main  ·  파일 2개  +10 −1  ·  Claude Code sonnet');
+    assert.equal(korean[3], '  내 이해도  ●●●  80% · 3회 연속');
+    assert.equal(header(80, 'ko', { calibrating: true, answered: 2, needed: 3, recent: [true, false] })[3], '  내 이해도  ●●○○○  집계 중 · 3개 남음');
+    assert.equal(header(80, 'en', { calibrating: false, accuracy: 80, streak: 3, recent: [true, false, true] })[3], '  Your understanding  ●●●  80% · 3 in a row');
   });
 
   // A frame wider than the terminal wraps, and the redraw's \r\x1b[2K clears only its last row, so each 90 ms redraw
   // would leave a stale row behind. Frames are collected with and without the seconds tail (it shows after 2 s).
   await t.test('the spinner cuts a wide label to the terminal width on a grapheme boundary', t => {
     t.mock.timers.enable({ apis: ['setInterval', 'Date'] });
-    const frames = (label, columns = 80) => {
+    const frames = (label, columns = 80, language = 'en', ms = 2100) => {
       let out = '';
       const stream = { isTTY: true, columns, write(chunk) { out += chunk; } };
-      const spinner = createSpinner(stream, createTerminal({ stream, env: { FORCE_COLOR: '1' } }).style);
+      const spinner = createSpinner(stream, createTerminal({ stream, env: { FORCE_COLOR: '1' } }).style, language);
       spinner.start(label);
-      t.mock.timers.tick(2100);
+      t.mock.timers.tick(ms);
       spinner.stop();
       return out.split('\r\x1b[2K').filter(Boolean).map(stripAnsi);
     };
@@ -357,6 +400,14 @@ test('the header and spinner fit the width with wide text', async t => {
     assert.ok(frames('리뷰하는 중').every(frame => frame.includes('리뷰하는 중') && !frame.includes('…')));
     assert.ok(frames('가'.repeat(37))[0].endsWith('가'.repeat(37)));
     assert.ok(frames('가'.repeat(38))[0].endsWith(`${'가'.repeat(36)}…`));
+    // The Korean tail ' · 12초' is 7 columns in 6 UTF-16 units. It leaves 67 columns of the 76, so a 68-column label is
+    // cut to 33 syllables and the ellipsis, and the frame is 78 columns.
+    const long = frames('가'.repeat(34), 80, 'ko', 12100).at(-1);
+    assert.equal(long, `  ${long[2]} ${'가'.repeat(33)}… · 12초`);
+    assert.equal(displayWidth(long), 78);
+    const short = frames('가'.repeat(34), 80, 'ko', 2100).at(-1);
+    assert.equal(short, `  ${short[2]} ${'가'.repeat(34)} · 2초`, 'the label fits beside the shorter tail');
+    assert.equal(displayWidth(short), 78);
   });
 });
 
@@ -369,4 +420,146 @@ test('Korean model text wraps within 80 columns across the terminal check', asyn
   assert.deepEqual(wide, [], 'no line is wider than the terminal');
   assert.match(h.output(), /┃ 재시도가/);
   assert.match(h.output(), /│ 아직 부족합니다\./);
+});
+
+test('a Korean terminal questionnaire shows Korean text within 80 columns', async t => {
+  const prompt = '같은 메시지가 다시 전달되면 결제가 몇 번 일어나는지, 그리고 왜 그렇게 되는지 코드를 근거로 설명해 주세요.';
+  const followUp = { status: 'active', question: question('q2', '두 번째 전달이 첫 번째 전달보다 먼저 끝나면 저장된 결제 기록은 어떻게 됩니까?'), progress: { completed: 0, total: 1 }, verdict: 'incorrect', feedback: '이 작업은 결제하기 전에 아무것도 저장하지 않으므로 두 번째 전달도 같은 결제 요청을 다시 보냅니다.' };
+  const done = { status: 'passed', question: null, progress: { completed: 1, total: 1 }, verdict: 'correct', feedback: '' };
+  const draft = { kind: 'answer', text: '한 번만 결제됩니다. 메시지를 다시 받아도 결제 함수는 저장된 기록을 먼저 확인하기 때문입니다.' };
+  const h = harness({ language: 'ko', waitingGit: true, prompt, draft, answers: ['/hint', '/wat', '/dispute', '한 번만 결제됩니다', '두 번 결제됩니다', '계속'], results: [followUp, done] });
+  assert.equal(await h.run(), 0);
+  const out = h.output(), lines = out.split('\n');
+  assert.deepEqual(overflowing(out), [], out);
+  assert.doesNotMatch(out, /\[object Object\]|"\$t"|\$join/u);
+  // The header ends at the terminal's edge with the Korean title, and the command help is Korean.
+  assert.equal(displayWidth(lines[1]), 80, lines[1]);
+  assert.ok(lines[1].endsWith(KO['terminal.header.title']), lines[1]);
+  assert.ok(out.includes(`\n  ${KO['terminal.commands.lineWaiting']}\n`), out);
+  for (const key of ['terminal.score.label', 'terminal.hint.lookAt', 'terminal.commands.unknownWaiting', 'terminal.commands.disputeNeedsReason', 'terminal.spinner.loadingPrepared', 'terminal.spinner.checking', 'terminal.verdict.incorrect', 'terminal.verdict.correct', 'terminal.done.complete', 'terminal.consent.continuePush', 'terminal.done.gitContinuing', 'terminal.draft.resend']) {
+    assert.ok(out.includes(KO[key]), `${key}\n${out}`);
+  }
+  for (const key of ['terminal.intro.openBook', 'terminal.consent.explainPush']) assert.ok(squash(out).includes(KO[key]), `${key}\n${out}`);
+  assert.ok(squash(out).includes(tx('ko', 'terminal.draft.savedAnswer', { text: draft.text })), out);
+  assert.ok(out.includes(`  ${tx('ko', 'terminal.question.number', { number: 1, total: 1 })}\n`) && out.includes(`  ${tx('ko', 'terminal.question.numberFollowUp', { number: 1, total: 1 })}\n`), out);
+  assert.equal(h.prompts.at(-1), `  › ${KO['terminal.consent.prompt']} `);
+  // None of Sphinx's own English sentences is left.
+  for (const [key, value] of Object.entries(EN)) {
+    if (key.startsWith('terminal.') && typeof value === 'string' && !value.includes('{')) assert.ok(!out.includes(value), `${key}: ${value}`);
+  }
+  // The review recovery: its notes ran past 80 columns in Korean (81, 86 and 104) and now wrap within them.
+  const runs = {};
+  for (const [name, scenario] of Object.entries(RECOVERY)) {
+    runs[name] = await recoveryRun(t, { ...scenario, language: 'ko' });
+    assert.deepEqual(overflowing(runs[name].output), [], `${name}:\n${runs[name].output}`);
+    assert.doesNotMatch(runs[name].output, /\[object Object\]|"\$t"|\$join/u);
+  }
+  assert.ok(squash(runs.switched.output).includes(localize(msg('common.recovery.switchedNote', { plan: 'Claude Code' }), 'ko')), runs.switched.output);
+  assert.ok(squash(runs.extended.output).includes(localize(msg('common.recovery.authorizedNote', { calls: 3 }), 'ko')), runs.extended.output);
+  assert.ok(squash(runs.setup.output).includes(KO['common.recovery.noRetry']), runs.setup.output);
+});
+
+test('계속 and 중단 answer the consent step', async () => {
+  const done = { status: 'passed', question: null, progress: { completed: 1, total: 1 }, verdict: 'correct', feedback: '' };
+  for (const language of ['en', 'ko']) {
+    for (const [answer, code] of [['계속', 0], ['중단', 4], ['continue', 0], ['stop', 4]]) {
+      const h = harness({ language, answers: ['It charges twice', answer], results: [{ ...done }], waitingGit: true });
+      assert.equal(await h.run(), code, `${language}: ${answer}`);
+      assert.deepEqual(h.prompts, ['  › ', `  › ${tx(language, 'terminal.consent.prompt')} `], 'accepted the first time');
+      assert.ok(h.output().includes(tx(language, code ? 'terminal.consent.stoppedPush' : 'terminal.done.gitContinuing')), h.output());
+    }
+  }
+});
+
+test('a Korean recovery menu shows Korean prompt text', async t => {
+  const run = await recoveryRun(t, { ...RECOVERY.extended, language: 'ko', answers: ['9', ''] });
+  assert.equal(run.code, 1);
+  const prompt = `\n${tx('ko', 'terminal.choose.promptDefault', { number: 2 })} `;
+  assert.deepEqual(run.prompts, [prompt, prompt]);
+  assert.ok(run.output.includes(`2. ${tx('ko', 'terminal.choose.defaultLabel', { label: KO['common.recovery.pauseLabel'] })}`), run.output);
+  assert.ok(squash(run.output).includes(`! ${tx('ko', 'terminal.choose.invalidDefault', { max: 2, label: KO['common.recovery.pauseLabel'] })}`), run.output);
+  assert.doesNotMatch(run.output, /Choose|\(default\)|Enter a number/u);
+  // A choice with no default asks and warns in Korean too.
+  let text = '';
+  const ui = createTerminal({ stream: { write: chunk => { text += chunk; } }, env: { NO_COLOR: '1' }, width: 80 });
+  const asked = [], answers = ['', '3', '1'];
+  const prompts = createPrompts({ ui, language: 'ko', ask: async value => { asked.push(value); return answers.shift(); } });
+  assert.equal(await prompts.choose({ title: '모델', requireSelection: true, current: 'b', choices: [{ value: 'a', label: 'A', description: '첫째' }, { value: 'b', label: 'B', description: '둘째' }] }), 'a');
+  assert.deepEqual(asked, Array(3).fill(`\n${KO['terminal.choose.prompt']} `));
+  assert.equal(text.split(tx('ko', 'terminal.choose.invalid', { max: 2 })).length - 1, 2, text);
+  assert.doesNotMatch(text, /기본값|default|Enter/u, 'nothing is chosen for you');
+});
+
+test('a Korean grading failure line is Korean', async () => {
+  const failed = Object.assign(new Error("The grader's reply couldn't be used, so this wasn't graded."), { ref: msg('common.grading.unusableAnswer') });
+  const h = harness({ language: 'ko', answers: ['한 번만 결제됩니다', '/quit'], results: [failed] });
+  assert.equal(await h.run(), 1);
+  const out = squash(h.output());
+  assert.ok(out.includes(`! ${tx('ko', 'terminal.error.notThrough', { message: KO['common.grading.unusableAnswer'] })}`), h.output());
+  assert.ok(out.includes(KO['terminal.error.keptManual']), h.output());
+  assert.ok(out.includes(KO['terminal.quit.progressSaved']), h.output());
+  assert.doesNotMatch(h.output(), /go through|couldn't be used|progress is kept/u);
+  // An error without a ref shows its own message inside the Korean line.
+  const plainError = harness({ language: 'ko', answers: ['한 번만 결제됩니다', '/quit'], results: [new Error('Provider timed out.')] });
+  assert.equal(await plainError.run(), 1);
+  assert.ok(squash(plainError.output()).includes(tx('ko', 'terminal.error.notThrough', { message: 'Provider timed out.' })), plainError.output());
+});
+
+test('built-in fallback texts print in the questionnaire language', async () => {
+  const { printSession } = await import('../src/cli.js');
+  // Feedback blocks lose their rule here, so a sentence wrapped across them reads whole.
+  const unblock = text => squash(text.replace(/\n {2}│ /gu, ' '));
+  for (const language of ['en', 'ko']) {
+    const catalog = language === 'ko' ? KO : EN;
+    // printVerdict: a flagged question and an empty grade keep their English text beside a code.
+    const results = [];
+    const h = harness({ language, answers: ['A', 'B', 'C'], results });
+    const same = (verdict, feedback, feedbackCode) => ({ status: 'active', question: h.q1, progress: { completed: 0, total: 1 }, verdict, feedback, feedbackCode });
+    results.push(same('incorrect', EN['common.fallback.flagged'], 'flagged'), same('ambiguous', EN['common.fallback.empty'], 'empty'), { status: 'passed', question: null, progress: { completed: 1, total: 1 }, verdict: 'correct', feedback: 'Model feedback stays as written.' });
+    assert.equal(await h.run(), 0);
+    for (const key of ['common.fallback.flagged', 'common.fallback.empty']) assert.ok(unblock(h.output()).includes(catalog[key]), `${language} ${key}\n${h.output()}`);
+    assert.ok(unblock(h.output()).includes('Model feedback stays as written.'));
+    if (language === 'ko') assert.doesNotMatch(h.output(), /does not match the code|no explanation this time/u);
+    // A pass with no questions (terminal-check.js's no-questions line): the documentation code, and a reviewer's own reason.
+    const documentation = harness({ language, answers: [], results: [], started: { status: 'passed', noQuestionReason: EN['common.fallback.documentation'], noQuestionCode: 'documentation', progress: { completed: 0, total: 0 } } });
+    assert.equal(await documentation.run(), 0);
+    assert.ok(documentation.output().includes(`✓ ${tx(language, 'terminal.verdict.noQuestionsNeeded', { reason: catalog['common.fallback.documentation'] })}\n`), documentation.output());
+    const reviewer = harness({ language, answers: [], results: [], started: { status: 'passed', noQuestionReason: 'Only renames a local variable.', progress: { completed: 0, total: 0 } } });
+    assert.equal(await reviewer.run(), 0);
+    assert.ok(reviewer.output().includes(`✓ ${tx(language, 'terminal.verdict.noQuestionsNeeded', { reason: 'Only renames a local variable.' })}\n`), reviewer.output());
+    // sphinx answer, explain and dispute: the fallback, the headings and the usage line, in the questionnaire language.
+    let printed = '';
+    const ui = createTerminal({ stream: { write: chunk => { printed += chunk; } }, env: { NO_COLOR: '1' }, width: 80 });
+    const route = { tier: 'small', provider: 'openrouter', model: 'openrouter/free' }, usage = { calls: 2, limit: 20 }, tokens = { input: 1200, output: 34, cost: 0.0031 };
+    printSession({ status: 'active', verdict: 'incorrect', feedback: EN['common.fallback.empty'], feedbackCode: 'empty', route, usage, tokens, progress: { completed: 0, total: 1 }, question: { prompt: 'Q?', choices: [] } }, ui, language);
+    assert.ok(printed.startsWith(`\n${tx(language, 'terminal.session.feedbackIncorrect')}\n${catalog['common.fallback.empty']}\n`), printed);
+    assert.ok(printed.includes(`\n${tx(language, 'terminal.session.tierSmall')} · openrouter:openrouter/free · ${localize(modelUsageRef(usage, tokens), language)}\n`), printed);
+    assert.ok(printed.includes(`\n${tx(language, 'terminal.question.number', { number: 1, total: 1 })}\nQ?\n`), printed);
+    assert.ok(squash(printed).includes(tx(language, 'terminal.session.answerHint')), printed);
+    printed = '';
+    printSession({ status: 'passed', verdict: 'ambiguous', feedback: EN['common.fallback.flagged'], feedbackCode: 'flagged', route, usage, tokens, progress: { completed: 1, total: 1 } }, ui, language);
+    assert.ok(squash(printed).includes(`${tx(language, 'terminal.session.feedbackAmbiguous')} ${catalog['common.fallback.flagged']}`), printed);
+    assert.ok(printed.includes(`✓ ${tx(language, 'terminal.done.complete')}\n`), printed);
+    assert.ok(squash(printed).includes(tx(language, 'terminal.done.approvalSaved')), printed);
+    if (language === 'ko') assert.match(printed, /[가-힣]/u);
+  }
+});
+
+test('notes and warnings wrap under their own text at the terminal width, and a row that fits keeps every byte', async t => {
+  // The authorized and no-retry notes were 94 and 109 columns at 80; they now break between words under the note's indent.
+  const extended = await recoveryRun(t, RECOVERY.extended);
+  assert.ok(extended.output.includes('\n  Authorized up to 3 additional model calls, including grading. Earlier usage\n  remains counted.\n'), extended.output);
+  const setup = await recoveryRun(t, RECOVERY.setup);
+  assert.ok(setup.output.includes('\n  Resolve the reported setup or evidence problem before resuming. Repeating this\n  attempt is not offered here.\n'), setup.output);
+  // A warning's later rows start under its text, clear of the mark.
+  const warned = await recoveryRun(t, { error: failure('Codex reported: the sign-in for this machine expired while the review was reading the diff of app.js.', 'PROVIDER_FAILED') });
+  assert.ok(warned.output.includes('\n  ! Codex reported: the sign-in for this machine expired while the review was\n    reading the diff of app.js.\n'), warned.output);
+  for (const run of [extended, setup, warned]) assert.deepEqual(overflowing(run.output), [], run.output);
+  // The saved-answer note keeps its line break: a long first row wraps under the note's indent; the second is as it was.
+  const long = harness({ answers: ['/quit'], results: [], draft: { kind: 'answer', text: 'It charges twice, because the job saves nothing before charge() and the queue redelivers the message.' } });
+  assert.equal(await long.run(), 1);
+  assert.ok(long.output().includes('\n  Your last answer was not graded and is saved: It charges twice, because the\n  job saves nothing before charge() and the queue redelivers the message.\nPress Enter to send it again, or type a new response.\n'), long.output());
+  const short = harness({ answers: ['/quit'], results: [], draft: { kind: 'dispute', text: 'It  assumes one worker.' } });
+  assert.equal(await short.run(), 1);
+  assert.ok(short.output().includes('\n  Your last dispute was not graded and is saved: It  assumes one worker.\nPress Enter to send it again, or type a new response.\n'), short.output());
 });

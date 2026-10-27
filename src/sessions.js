@@ -109,6 +109,10 @@ export const documentationOnly = files => Array.isArray(files) && files.length >
 // Sphinx's own reason for a change with nothing to understand. A session keeps it in English; noQuestionCode lets each
 // screen draw it in the questionnaire language.
 export const DOCUMENTATION_REASON = 'Documentation-only change.';
+const FALLBACK_KEYS = { flagged: 'common.fallback.flagged', empty: 'common.fallback.empty', documentation: 'common.fallback.documentation' };
+/** What a screen shows for public feedback or a no-question reason: Sphinx's own sentence as a ref when a code names one,
+ * otherwise the stored text as it is. */
+export const fallbackText = (code, text) => FALLBACK_KEYS[code] ? msg(FALLBACK_KEYS[code]) : text;
 // Background preparation only records the reviewer's decision (pass = false); the
 // pass is made when someone starts the check, so a waiting push still asks first.
 function passWithoutQuestions(session, config, reason, pass = true, hold = false) {
