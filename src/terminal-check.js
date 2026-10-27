@@ -3,7 +3,7 @@ import { readStats, scoreSummary } from './stats.js';
 import { prepareInteractiveCheck } from './check-recovery.js';
 import { savedDraft } from './sessions.js';
 import { VERSION } from './version.js';
-import { wrapText, stripAnsi } from './terminal.js';
+import { chunks, displayWidth, wrapText } from './terminal.js';
 import { localize } from './i18n.js';
 
 // The terminal questionnaire: the same check as the browser page, laid out for
@@ -26,8 +26,8 @@ export function createSpinner(stream, style, language = 'en') {
   const draw = () => {
     const seconds = Math.floor((Date.now() - started) / 1000);
     const tail = seconds >= 2 ? ` · ${seconds}s` : '';
-    const room = width() - 2 - tail.length;
-    const text = label.length > room ? `${label.slice(0, room - 1)}…` : label;
+    const room = width() - 2 - displayWidth(tail);
+    const text = displayWidth(label) > room ? `${chunks(label, room - 1)[0]}…` : label;
     stream.write(`\r\x1b[2K  ${style.amber(FRAMES[index++ % FRAMES.length])} ${text}${style.muted(tail)}`);
   };
   return {
@@ -64,14 +64,15 @@ function block(terminal, text, rule) {
   for (const line of wrapText(plain(text), terminal.width - 4, '').split('\n')) terminal.line(`  ${rule(style)} ${line}`);
 }
 
-export function printHeader(terminal, { session, score }) {
+// label is the right-hand text. The gap before it counts display columns, so a Korean label still ends at the terminal's edge.
+export function printHeader(terminal, { session, score, label = 'understanding check' }) {
   const { style } = terminal, snapshot = session.snapshot || {};
   const repo = snapshot.repoRoot ? path.basename(snapshot.repoRoot) : '';
   const destination = snapshot.target?.ref ? `${snapshot.target.remote ? `${snapshot.target.remote}/` : ''}${snapshot.target.ref.replace(/^refs\/heads\//, '')}` : '';
   const stats = snapshot.stats ? `${count(snapshot.stats.files)} file${snapshot.stats.files === 1 ? '' : 's'}  ${style.green(`+${count(snapshot.stats.additions)}`)} ${style.amber(`−${count(snapshot.stats.deletions)}`)}` : '';
   const title = `  ${style.amber('◆')} ${style.strong('sphinx')} ${style.muted(`v${VERSION}`)}`;
-  const right = style.muted('understanding check');
-  const gap = Math.max(2, terminal.width - stripAnsi(title).length - stripAnsi(right).length);
+  const right = style.muted(label);
+  const gap = Math.max(2, terminal.width - displayWidth(title) - displayWidth(right));
   terminal.line('');
   terminal.line(`${title}${' '.repeat(gap)}${right}`);
   const facts = [[repo, destination].filter(Boolean).join(' → '), stats, routeText(session.route)].filter(Boolean);

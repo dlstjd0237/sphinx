@@ -1,5 +1,23 @@
 const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 export const stripAnsi = value => String(value).replace(ANSI, '');
+const ANSI_PARTS = new RegExp(`(${ANSI.source})`);
+
+// Terminal columns, not UTF-16 units: Hangul, CJK and emoji take two, marks and joiners none. Measured per grapheme,
+// so a ZWJ sequence or a decomposed Hangul syllable is one cell. The rules are spec 4.7.
+// The segmenter is built on first use: loading its break rules takes about 10 ms, which every Sphinx start would pay
+// although English text never needs it.
+let segmenter;
+const graphemes = text => (segmenter ??= new Intl.Segmenter('en', { granularity: 'grapheme' })).segment(text);
+const NO_COLUMN = /^[\p{Mn}\p{Me}\p{Cf}\u{1160}-\u{11FF}\u{D7B0}-\u{D7FF}]+$/u;
+const TWO_COLUMNS = /\u{FE0F}|\p{Emoji_Presentation}|[\u{1100}-\u{115F}\u{2E80}-\u{A4CF}\u{AC00}-\u{D7A3}\u{F900}-\u{FAFF}\u{FE30}-\u{FE4F}\u{FF00}-\u{FF60}\u{FFE0}-\u{FFE6}\u{20000}-\u{3FFFD}]/u;
+const graphemeWidth = grapheme => NO_COLUMN.test(grapheme) ? 0 : TWO_COLUMNS.test(grapheme) ? 2 : 1;
+export function displayWidth(text) {
+  const visible = stripAnsi(text);
+  if (/^[\x20-\x7e]*$/u.test(visible)) return visible.length; // printable ASCII: one column each, no segmenter needed
+  let width = 0;
+  for (const { segment } of graphemes(visible)) width += graphemeWidth(segment);
+  return width;
+}
 
 const dropFailedWrite = () => {};
 /** One line to stderr. A Git client that cancelled can close a hook's stderr while the hook still has to free the
@@ -16,26 +34,32 @@ export function colorEnabled({ stream = process.stdout, env = process.env } = {}
   return !!stream.isTTY && env.TERM !== 'dumb';
 }
 
-function chunks(word, length) {
-  const parts = word.match(/\x1b\[[0-?]*[ -/]*[@-~]|[^]/gu) || [];
+/** Cuts a word into pieces of at most `length` columns, only between graphemes. Color codes stay where they are and take
+ * no room; they are split off first because Intl.Segmenter would break an escape sequence apart. A grapheme wider than
+ * the room still goes alone onto a piece of its own, so the cut always moves on. */
+export function chunks(word, length) {
   const result = []; let current = '', count = 0;
-  for (const part of parts) {
-    if (!part.startsWith('\x1b') && count === length) { result.push(current); current = ''; count = 0; }
-    current += part;
-    if (!part.startsWith('\x1b')) count++;
+  for (const [index, part] of word.split(ANSI_PARTS).entries()) {
+    if (index % 2) { current += part; continue; }
+    for (const { segment } of graphemes(part)) {
+      const width = graphemeWidth(segment);
+      if (width && count && count + width > length) { result.push(current); current = ''; count = 0; }
+      current += segment; count += width;
+    }
   }
   if (current) result.push(current);
   return result;
 }
 
 export function wrapText(value, width = 80, indent = '') {
-  const room = Math.max(1, width - stripAnsi(indent).length);
+  const room = Math.max(1, width - displayWidth(indent));
   return String(value).split('\n').flatMap(paragraph => {
     if (!paragraph.trim()) return [''];
     const lines = []; let line = '';
     for (const word of paragraph.trim().split(/\s+/u)) {
-      if (line && stripAnsi(line).length + 1 + stripAnsi(word).length > room) { lines.push(indent + line); line = ''; }
-      const pieces = chunks(word, room);
+      const size = displayWidth(word);
+      if (line && displayWidth(line) + 1 + size > room) { lines.push(indent + line); line = ''; }
+      const pieces = size > room ? chunks(word, room) : [word];
       for (let i = 0; i < pieces.length; i++) {
         if (line) line += ' ';
         line += pieces[i];
@@ -77,11 +101,11 @@ export function createTerminal({ stream = process.stdout, env = process.env, wid
   const paragraph = (text, indent = '') => write(wrapText(text, size, indent));
   const section = text => { write(''); paragraph(style.strong(text)); };
   const rows = entries => {
-    const maxLabel = Math.max(0, ...entries.map(([label]) => stripAnsi(label).length));
+    const maxLabel = Math.max(0, ...entries.map(([label]) => displayWidth(label)));
     const inline = size >= 68 && maxLabel <= Math.floor(size * 0.45);
     for (const [label, description] of entries) {
       if (!inline) { paragraph(style.strong(label), '  '); paragraph(description, '    '); continue; }
-      const left = `  ${label}${' '.repeat(maxLabel - stripAnsi(label).length + 3)}`;
+      const left = `  ${label}${' '.repeat(maxLabel - displayWidth(label) + 3)}`;
       const lines = wrapText(description, size - maxLabel - 5).split('\n');
       write(style.strong(left) + lines[0]);
       for (const line of lines.slice(1)) write(' '.repeat(maxLabel + 5) + line);
@@ -89,13 +113,13 @@ export function createTerminal({ stream = process.stdout, env = process.env, wid
   };
   // Columns align when they fit; narrow terminals get wrapped label/value rows.
   const table = (head, body) => {
-    const widths = head.map((_, column) => Math.max(...[head, ...body].map(row => stripAnsi(row[column]).length)));
+    const widths = head.map((_, column) => Math.max(...[head, ...body].map(row => displayWidth(row[column]))));
     if (2 + widths.reduce((sum, width) => sum + width + 3, -3) > size) {
       rows(body.map(([label, ...cells]) => [label, cells.map((cell, index) => `${head[index + 1]} ${cell}`).join(' · ')]));
       return;
     }
     const pad = (cell, column) => {
-      const room = ' '.repeat(widths[column] - stripAnsi(cell).length);
+      const room = ' '.repeat(widths[column] - displayWidth(cell));
       return column === 0 ? cell + room : room + cell;
     };
     write(style.muted(`  ${head.map(pad).join('   ')}`));

@@ -7,8 +7,8 @@ import { Writable } from 'node:stream';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { runTerminalCheck } from '../src/terminal-check.js';
-import { createTerminal } from '../src/terminal.js';
+import { createSpinner, printHeader, runTerminalCheck } from '../src/terminal-check.js';
+import { createTerminal, displayWidth, stripAnsi } from '../src/terminal.js';
 import { openVisibleTerminal, prefersTerminal, runGitTerminalCheck } from '../src/git-interview.js';
 import { DEFAULT_CONFIG, policyHash, validateConfig, validateRepositoryConfig } from '../src/config.js';
 import { createSessionStore } from '../src/sessions.js';
@@ -18,10 +18,10 @@ import { MODEL_OUTPUT_ERRORS } from '../src/evaluator.js';
 import { join, localize, msg } from '../src/i18n.js';
 
 const question = (id, prompt, extra = {}) => ({ id, prompt, choices: [], ...extra });
-function harness({ answers, results, waitingGit = false, more = false, started, event = 'pre-push', width = 80, held = false }) {
+function harness({ answers, results, waitingGit = false, more = false, started, event = 'pre-push', width = 80, held = false, prompt = 'What happens on redelivery?\u001b[2J' }) {
   let output = '';
   const stream = new Writable({ write(chunk, _e, done) { output += chunk; done(); } });
-  const q1 = question('q1', 'What happens on redelivery?\u001b[2J', { evidence: [{ path: 'src/jobs/charge.js', reason: 'PRIVATE_REASON' }] });
+  const q1 = question('q1', prompt, { evidence: [{ path: 'src/jobs/charge.js', reason: 'PRIVATE_REASON' }] });
   const session = { id: 'x', questions: [q1], ...(held ? { status: 'passed', held: { at: '2026-10-23T00:00:00.000Z' } } : {}), route: { provider: 'claude', model: 'sonnet' }, snapshot: { repoRoot: '/work/billing', event, target: { remote: 'origin', ref: 'refs/heads/main' }, stats: { files: 2, additions: 10, deletions: 1 } } };
   const sent = [], skips = [], prompts = [], starts = [];
   const store = {
@@ -314,4 +314,59 @@ test('a saved ungraded answer is shown once and Enter sends it again without ret
   assert.equal(code, 0);
   assert.match(output, /Your last dispute was not graded and is saved: It assumes one worker\./);
   assert.deepEqual(sent, [{ text: 'It assumes one worker.', dispute: true }]);
+});
+
+// Widths below are measured with displayWidth, never .length: .length counts a Hangul syllable as one column, so a
+// Korean line that overflows the terminal would still pass.
+test('the header and spinner fit the width with wide text', async t => {
+  await t.test('the header pads the gap before its label by display columns', () => {
+    const session = { snapshot: { repoRoot: '/work/billing', target: { remote: 'origin', ref: 'refs/heads/main' }, stats: { files: 2, additions: 10, deletions: 1 } }, route: { provider: 'claude', model: 'sonnet' } };
+    for (const width of [50, 80, 100]) {
+      for (const label of [undefined, '이해도 점검']) {
+        const lines = [];
+        const terminal = { ...createTerminal({ stream: { write() {} }, env: { NO_COLOR: '1' }, width }), line: text => lines.push(text) };
+        printHeader(terminal, { session, score: null, label });
+        assert.equal(displayWidth(lines[1]), width, `${label ?? 'default label'} at ${width}: ${lines[1]}`);
+        assert.ok(lines[1].endsWith(label ?? 'understanding check'), lines[1]);
+      }
+    }
+  });
+
+  // A frame wider than the terminal wraps, and the redraw's \r\x1b[2K clears only its last row, so each 90 ms redraw
+  // would leave a stale row behind. Frames are collected with and without the seconds tail (it shows after 2 s).
+  await t.test('the spinner cuts a wide label to the terminal width on a grapheme boundary', t => {
+    t.mock.timers.enable({ apis: ['setInterval', 'Date'] });
+    const frames = (label, columns = 80) => {
+      let out = '';
+      const stream = { isTTY: true, columns, write(chunk) { out += chunk; } };
+      const spinner = createSpinner(stream, createTerminal({ stream, env: { FORCE_COLOR: '1' } }).style);
+      spinner.start(label);
+      t.mock.timers.tick(2100);
+      spinner.stop();
+      return out.split('\r\x1b[2K').filter(Boolean).map(stripAnsi);
+    };
+    const longPath = 'src/components/dashboard/widgets/RevenueChart.test.tsx';
+    const korean = frames(`Reviewing · ${localize(activityText('read_file', { path: longPath }), 'ko')}`);
+    for (const frame of korean) assert.ok(displayWidth(frame) <= 80, `${displayWidth(frame)} columns: ${frame}`);
+    assert.ok(korean.length > 2 && korean[0].endsWith('…') && korean.at(-1).endsWith('… · 2s'), JSON.stringify([korean[0], korean.at(-1)]));
+    // The cut counts display columns: whole rockets, never half a surrogate pair.
+    const rockets = frames('🚀'.repeat(60));
+    for (const frame of rockets) assert.doesNotMatch(frame, /\p{Surrogate}/u);
+    assert.deepEqual([rockets[0], rockets.at(-1)].map(displayWidth), [77, 78]);
+    // A label that fits is shown whole; one wide syllable too many is cut before it, leaving the ellipsis in its room.
+    assert.ok(frames('리뷰하는 중').every(frame => frame.includes('리뷰하는 중') && !frame.includes('…')));
+    assert.ok(frames('가'.repeat(37))[0].endsWith('가'.repeat(37)));
+    assert.ok(frames('가'.repeat(38))[0].endsWith(`${'가'.repeat(36)}…`));
+  });
+});
+
+test('Korean model text wraps within 80 columns across the terminal check', async () => {
+  const prompt = '재시도가 같은 결제 요청을 두 번 보내면 어떤 일이 일어나는지, 그리고 왜 그렇게 되는지 코드의 어느 부분을 근거로 들어 설명해 주세요.';
+  const followUp = { status: 'active', question: question('q2', '두 번째 호출이 첫 번째 호출보다 먼저 끝나는 경우에는 저장된 결제 기록이 어떻게 바뀌는지 같은 방식으로 설명해 주세요.'), progress: { completed: 0, total: 1 }, verdict: 'incorrect', feedback: '아직 부족합니다. 이 작업은 결제를 보내기 전에 아무것도 저장하지 않으므로 두 번째 호출도 같은 요청을 다시 보내게 됩니다. 멱등 키가 없다는 점을 짚어 보세요.' };
+  const h = harness({ answers: ['한 번만 결제됩니다', '/quit'], results: [followUp], prompt });
+  assert.equal(await h.run(), 1);
+  const wide = h.output().split('\n').filter(line => displayWidth(line) > 80);
+  assert.deepEqual(wide, [], 'no line is wider than the terminal');
+  assert.match(h.output(), /┃ 재시도가/);
+  assert.match(h.output(), /│ 아직 부족합니다\./);
 });
