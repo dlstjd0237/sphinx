@@ -62,7 +62,7 @@ You should see:
 
 Use `--preset codex-economy` for Codex, or `--agents none` if you don't use a coding agent. Other presets, OpenRouter, OpenAI-compatible endpoints, and custom routes are covered in [configuration](docs/configuration.md#reviewer-models).
 
-Settings files symlinked into a dotfiles repository (Stow, Dotbot, chezmoi, home-manager) are supported: Sphinx edits the link's target in place and keeps the link. Hooks call the `sphinx` command your package manager installed (npm, pnpm, yarn, or Bun), so upgrading the package keeps them working.
+Settings files symlinked into a dotfiles repository (Stow, Dotbot, chezmoi, home-manager) are supported: Sphinx edits the link's target in place and keeps the link. Hooks call the `sphinx` command your package manager installed (npm, pnpm, yarn, or Bun), so upgrading the package keeps them working. On native Windows they start `node.exe` and Sphinx's CLI file by path instead, so run `sphinx install` again after an upgrade that moves either one: a pnpm update to a new version does, since each version gets its own folder and the old one is deleted, and so does removing the Node version that a version manager installed Sphinx under. npm's global folder keeps its path. `sphinx doctor` tells you when a file has moved and which install to run.
 
 ### 2. Load Sphinx in your coding agent (required if you use one)
 
@@ -135,7 +135,7 @@ To github.com:you/your-repo.git
 - **Dispute question.** Use this if a question's premise is wrong or ambiguous. A bad question must be corrected before that concept can pass.
 - **Stop push.** Stops the waiting push at any point before you pass: it does not go through, and your progress is saved. Run the same `git push` later to pick up where you left off. For a commit it reads **Stop commit**; with no Git operation waiting, **Pause check**.
 - **Continue or stop.** After you pass, or when no questions are needed, Git still waits for your choice. **Continue push** lets it go through. **Stop push** ends it with your pass saved, so pushing the same change again asks only whether to continue, unless the code, destination, or policy changed.
-- **Closing the tab** doesn't stop anything. Git keeps waiting, and the same address works until the 25-minute deadline. When Git runs from a GUI client or on Windows without a terminal, the push stops 3 minutes after every Sphinx tab is closed; your progress is saved.
+- **Closing the tab** doesn't stop a push from a terminal or a coding agent. Git keeps waiting, and the same address works until the 25-minute deadline. When Git runs from a GUI client, or on Windows with neither a terminal nor a coding agent, the push stops 3 minutes after every Sphinx tab is closed; your progress is saved.
 - **Skip this time.** Lets the push through immediately, even while the review is still running. Skips never count as passing.
 - **`sphinx yolo`** turns checks off for the current repository, or globally when run outside one. Run it again to turn checks back on. A repository's own setting wins over the global one, so turning yolo off inside a repository keeps checks on there even while global yolo is on. `--reason "prod hotfix"` is optional.
 - **`sphinx check`** runs the same check in your terminal instead of the browser.
