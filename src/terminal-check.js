@@ -17,17 +17,29 @@ const plain = text => String(text ?? '').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
 const PROVIDERS = { openrouter: 'OpenRouter', openai: 'Endpoint', claude: 'Claude Code', codex: 'Codex' };
 const routeText = route => route?.provider ? [PROVIDERS[route.provider] || route.provider, route.model].filter(Boolean).join(' ') : '';
 const count = n => Number(n || 0).toLocaleString('en-US');
-// The answers to the continue step; 계속 and 중단 are accepted in every language.
-const CONTINUE = ['continue', 'c', 'y', 'yes', 'proceed', '계속'], STOP = ['stop', 's', 'n', 'no', '/stop', '/quit', '중단'];
+// Answers accepted in every language. ㅊ, ㅛ, ㄴ and ㅜ are c, y, s and n typed with the Korean IME on.
+// The continue step:
+const CONTINUE = ['continue', 'c', 'y', 'yes', 'proceed', '계속', 'ㅊ', 'ㅛ'], STOP = ['stop', 's', 'n', 'no', '/stop', '/quit', '중단', 'ㄴ', 'ㅜ'];
+// What goes back from the skip confirmation instead of becoming its reason:
+const BACK = ['n', 'no', '아니요', '아니오', '아니', '중단', 'ㅜ'];
 
-/** A note or warning, one row per line of its text: a row that fits the width is written as it is, and a longer one wraps
- * between words with its later rows under its own text. Only the first row has the lead, as before. */
+/** A note or warning, one row per line of its text; only the first row has the lead, as before. A row that fits the width
+ * is written as it is. A longer one breaks only at its spaces, each piece under the row's own text and indentation; the
+ * spaces at a break are dropped and all others kept. A word longer than the room is never cut: it stays whole on a row of
+ * its own, as before notes wrapped. */
 function fit(text, width, lead) {
   return String(text).split('\n').map((row, index) => {
     const head = index ? '' : lead;
     if (displayWidth(head + row) <= width) return head + row;
-    const under = ' '.repeat(displayWidth(head));
-    return wrapText(row, width - under.length).split('\n').map((line, at) => (at ? under : head) + line).join('\n');
+    const own = row.match(/^\s*/u)[0], under = ' '.repeat(displayWidth(head)) + own;
+    const [first, ...rest] = row.slice(own.length).trimEnd().split(/(\s+)/u);
+    const lines = [];
+    let line = head + own + first;
+    for (let i = 0; i < rest.length; i += 2) {
+      if (displayWidth(line + rest[i] + rest[i + 1]) <= width) line += rest[i] + rest[i + 1];
+      else { lines.push(line); line = under + rest[i + 1]; }
+    }
+    return [...lines, line].join('\n');
   }).join('\n');
 }
 
@@ -197,7 +209,7 @@ export async function runTerminalCheck({ store, session, config, ask, terminal: 
     if (answer === '/skip') {
       if (!waitingGit || !skip) { terminal.warning(t(language, 'terminal.skip.unavailable')); continue; }
       const reason = plain(await ask(`  ${style.muted(t(language, 'terminal.skip.prompt'))} `)).trim();
-      if (/^n(o)?$/i.test(reason)) continue;
+      if (BACK.includes(reason.toLowerCase())) continue;
       await skip(reason || undefined);
       terminal.line(''); terminal.line(`  ${style.amber('↷')} ${t(language, 'terminal.skip.done')}`);
       return 3;

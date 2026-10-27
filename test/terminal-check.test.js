@@ -462,12 +462,27 @@ test('a Korean terminal questionnaire shows Korean text within 80 columns', asyn
 test('계속 and 중단 answer the consent step', async () => {
   const done = { status: 'passed', question: null, progress: { completed: 1, total: 1 }, verdict: 'correct', feedback: '' };
   for (const language of ['en', 'ko']) {
-    for (const [answer, code] of [['계속', 0], ['중단', 4], ['continue', 0], ['stop', 4]]) {
+    // ㅊ, ㅛ, ㄴ and ㅜ are c, y, s and n typed with the Korean IME on.
+    for (const [answer, code] of [['계속', 0], ['중단', 4], ['continue', 0], ['stop', 4], ['ㅊ', 0], ['ㅛ', 0], ['ㄴ', 4], ['ㅜ', 4]]) {
       const h = harness({ language, answers: ['It charges twice', answer], results: [{ ...done }], waitingGit: true });
       assert.equal(await h.run(), code, `${language}: ${answer}`);
       assert.deepEqual(h.prompts, ['  › ', `  › ${tx(language, 'terminal.consent.prompt')} `], 'accepted the first time');
       assert.ok(h.output().includes(tx(language, code ? 'terminal.consent.stoppedPush' : 'terminal.done.gitContinuing')), h.output());
     }
+  }
+});
+
+test('the skip confirmation goes back on n, no, the Korean no-words, 중단 and ㅜ in both languages; another answer is the reason', async () => {
+  for (const language of ['en', 'ko']) {
+    for (const word of ['n', 'no', 'N', 'No', '아니요', '아니오', '아니', '중단', 'ㅜ']) {
+      const h = harness({ language, answers: ['/skip', word, '/stop'], results: [], waitingGit: true });
+      assert.equal(await h.run(), 1, `${language}: ${word} goes back to the question`);
+      assert.deepEqual(h.skips, [], `${language}: ${word} does not skip`);
+      assert.doesNotMatch(h.output(), /↷/u);
+    }
+    const skipped = harness({ language, answers: ['/skip', '급한 수정'], results: [], waitingGit: true });
+    assert.equal(await skipped.run(), 3);
+    assert.deepEqual(skipped.skips, ['급한 수정']);
   }
 });
 
@@ -562,4 +577,23 @@ test('notes and warnings wrap under their own text at the terminal width, and a 
   const short = harness({ answers: ['/quit'], results: [], draft: { kind: 'dispute', text: 'It  assumes one worker.' } });
   assert.equal(await short.run(), 1);
   assert.ok(short.output().includes('\n  Your last dispute was not graded and is saved: It  assumes one worker.\nPress Enter to send it again, or type a new response.\n'), short.output());
+});
+
+test('a wrapped note or warning breaks only between words: a long word stays whole, and a row keeps its indentation and spacing', async t => {
+  // A path or URL longer than the row is never cut: it stays whole on a row of its own, as before notes wrapped.
+  const path = `/Users/someone/Library/Caches/codex/2026-10-28/${'0123456789abcdef'.repeat(5)}.json`;
+  const long = await recoveryRun(t, { error: failure(`Codex could not read ${path}`, 'PROVIDER_FAILED') });
+  assert.ok(long.output.includes(`\n  ! Codex could not read\n    ${path}\n`), long.output);
+  const url = `https://openrouter.ai/api/v1/chat/completions/requests/${'0123456789abcdef'.repeat(3)}`;
+  const graded = harness({ answers: ['It charges twice', '/quit'], results: [new Error(`Request to ${url} failed.`)] });
+  assert.equal(await graded.run(), 1);
+  assert.ok(graded.output().includes(`\n  ! That didn't go through: Request to\n    ${url}\n    failed.\n`), graded.output());
+  // A later row keeps its own indentation, on each of its pieces.
+  const detail = '    at /Users/someone/Library/Application Support/Codex/sessions/2026/10/28/rollout-2026-10-28T03-12-55.jsonl line 42';
+  const indented = await recoveryRun(t, { error: failure(`Codex reported: the review stopped.\n${detail}`, 'PROVIDER_FAILED') });
+  assert.ok(indented.output.includes('\n  ! Codex reported: the review stopped.\n    at /Users/someone/Library/Application\n    Support/Codex/sessions/2026/10/28/rollout-2026-10-28T03-12-55.jsonl line 42\n'), indented.output);
+  // Spaces inside a wrapped row stay as they were typed; only the spaces where it breaks give way to the line break.
+  const spaced = harness({ answers: ['/quit'], results: [], draft: { kind: 'answer', text: 'It charges twice:  the job saves nothing before charge(),  and the queue redelivers the message.' } });
+  assert.equal(await spaced.run(), 1);
+  assert.ok(spaced.output().includes('\n  Your last answer was not graded and is saved: It charges twice:  the job saves\n  nothing before charge(),  and the queue redelivers the message.\nPress Enter to send it again, or type a new response.\n'), spaced.output());
 });

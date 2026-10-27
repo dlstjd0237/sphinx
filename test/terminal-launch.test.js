@@ -11,6 +11,7 @@ import { terminalCommand, launchCheckpointTerminal, checkpointTerminalStatus, wa
 import { terminalHandoff } from '../src/lifecycle-integrations.js';
 import { EN } from '../src/i18n.js';
 import { KO } from '../src/i18n-ko.js';
+import { displayWidth } from '../src/terminal.js';
 
 const ID = 'a'.repeat(64);
 const json = async file => JSON.parse(await readFile(file, 'utf8'));
@@ -368,6 +369,13 @@ test('the dedicated window speaks the questionnaire language, and English when t
     assert.equal(run.status, 1);
     assert.equal((await json(f.recordFile)).status, 'unavailable');
   }
+  // The window's lines are written unwrapped. The Korean ones fit an 80-column window; the English ones keep their bytes.
+  for (const key of ['terminal.window.complete', 'terminal.window.incomplete', 'terminal.window.pressEnter']) assert.ok(displayWidth(KO[key]) <= 80, `${key}: ${displayWidth(KO[key])} columns`);
+  assert.deepEqual(['terminal.window.complete', 'terminal.window.incomplete', 'terminal.window.pressEnter'].map(key => EN[key]), [
+    'Sphinx check complete. You can close this window and return to your coding agent.',
+    'Sphinx check remains incomplete. You can close this window; progress is saved.',
+    'The check did not finish; your progress is saved. Press Enter to close this window.',
+  ]);
   // The prompt that keeps an unfinished check's window open gets the language beside its output stream.
   const f = await fixture(t);
   await launchCheckpointTerminal({ ...f.options, launch: async () => true });
