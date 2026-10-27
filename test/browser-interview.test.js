@@ -167,6 +167,14 @@ test('an unattended GUI wait stops after the page stays closed', async t => {
   assert.equal((await checkpointTerminalStatus({ id: f.snapshot.id, env: f.env })).status, 'abandoned');
 });
 
+test('a page that connects as soon as the stop applies already hears of it, before the review starts', async t => {
+  let seen = 'not read';
+  // The check asks for the reviewer plans right after it arms the stop, before it publishes anything else.
+  const f = await fixture(t, { interviewOptions: { ...unattended, findPlans: async () => { seen = f.interview.state.abandonAfterMs; return []; } } });
+  assert.equal((await f.present()).status, 'pending');
+  assert.equal(seen, 50);
+});
+
 test('an open page keeps the unattended wait alive and a quick reconnect does not stop it', async t => {
   const pages = [], f = await fixture(t, { interviewOptions: showing(pages) }), done = f.present();
   await f.waitFor('question');

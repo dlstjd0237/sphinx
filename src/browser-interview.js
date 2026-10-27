@@ -414,6 +414,8 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
         const [op] = words(session.snapshot.event), minutes = Math.max(1, Math.round(abandonMs / 60000));
         let lastSeen = Date.now();
         abandonAfterMs = abandonMs;
+        // A page that connects before the next update already says the wait ends.
+        publish(state, { display: true });
         abandonWatch = setInterval(() => {
           if (streams.size) lastSeen = Date.now();
           else if (Date.now() - lastSeen >= abandonMs && !controller.signal.aborted) {
