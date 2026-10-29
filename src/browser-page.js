@@ -13,7 +13,7 @@ const scriptJSON = value => JSON.stringify(value).replace(/</g, '\\u003c');
 export function browserPage({ token, nonce, language = 'en' }) {
   const html = key => esc(t(language, key));
   return `<!doctype html>
-<html lang="${language}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${html('page.title.default')}</title>
+<html lang="${esc(language)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${html('page.title.default')}</title>
 <style nonce="${nonce}">
 :root{color-scheme:light;--ink:#292524;--muted:#6b6259;--line:#dfd8cf;--paper:#faf8f5;--amber:#a45009;--focus:#b45309;--pass:#3d6b35;--retry:#8d271e;--add:#e8f1e3;--add-ink:#2f5d28;--del:#f8e6e2;--del-ink:#8d271e;--mark:#fdf0cc;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.6 "Avenir Next",Avenir,sans-serif}

@@ -463,7 +463,7 @@ test('계속 and 중단 answer the consent step', async () => {
   const done = { status: 'passed', question: null, progress: { completed: 1, total: 1 }, verdict: 'correct', feedback: '' };
   for (const language of ['en', 'ko']) {
     // ㅊ, ㅛ, ㄴ and ㅜ are c, y, s and n typed with the Korean IME on.
-    for (const [answer, code] of [['계속', 0], ['중단', 4], ['continue', 0], ['stop', 4], ['ㅊ', 0], ['ㅛ', 0], ['ㄴ', 4], ['ㅜ', 4]]) {
+    for (const [answer, code] of [['계속', 0], ['중단', 4], ['continue', 0], ['stop', 4], ['ㅊ', 0], ['ㅛ', 0], ['ㄴ', 4], ['ㅜ', 4], ['계속.', 0], ['stop!', 4], ['중단.', 4]]) {
       const h = harness({ language, answers: ['It charges twice', answer], results: [{ ...done }], waitingGit: true });
       assert.equal(await h.run(), code, `${language}: ${answer}`);
       assert.deepEqual(h.prompts, ['  › ', `  › ${tx(language, 'terminal.consent.prompt')} `], 'accepted the first time');
@@ -474,7 +474,7 @@ test('계속 and 중단 answer the consent step', async () => {
 
 test('the skip confirmation goes back on n, no, the Korean no-words, 중단 and ㅜ in both languages; another answer is the reason', async () => {
   for (const language of ['en', 'ko']) {
-    for (const word of ['n', 'no', 'N', 'No', '아니요', '아니오', '아니', '중단', 'ㅜ']) {
+    for (const word of ['n', 'no', 'N', 'No', '아니요', '아니오', '아니', '중단', 'ㅜ', 'ㅜㅐ', '취소', '아뇨', '아닙니다', 'no.', '아니요.', '아닙니다!', '취소?']) {
       const h = harness({ language, answers: ['/skip', word, '/stop'], results: [], waitingGit: true });
       assert.equal(await h.run(), 1, `${language}: ${word} goes back to the question`);
       assert.deepEqual(h.skips, [], `${language}: ${word} does not skip`);

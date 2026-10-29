@@ -21,7 +21,9 @@ const count = n => Number(n || 0).toLocaleString('en-US');
 // The continue step:
 const CONTINUE = ['continue', 'c', 'y', 'yes', 'proceed', '계속', 'ㅊ', 'ㅛ'], STOP = ['stop', 's', 'n', 'no', '/stop', '/quit', '중단', 'ㄴ', 'ㅜ'];
 // What goes back from the skip confirmation instead of becoming its reason:
-const BACK = ['n', 'no', '아니요', '아니오', '아니', '중단', 'ㅜ'];
+const BACK = ['n', 'no', '아니요', '아니오', '아니', '아뇨', '아닙니다', '취소', '중단', 'ㅜ', 'ㅜㅐ'];
+// An answer compared as a word: lower case, without the full stop, ! or ? someone types after it.
+const word = text => text.toLowerCase().replace(/[.!?。]+$/u, '');
 
 /** A note or warning, one row per line of its text; only the first row has the lead, as before. A row that fits the width
  * is written as it is. A longer one breaks only at its spaces, each piece under the row's own text and indentation; the
@@ -209,7 +211,7 @@ export async function runTerminalCheck({ store, session, config, ask, terminal: 
     if (answer === '/skip') {
       if (!waitingGit || !skip) { terminal.warning(t(language, 'terminal.skip.unavailable')); continue; }
       const reason = plain(await ask(`  ${style.muted(t(language, 'terminal.skip.prompt'))} `)).trim();
-      if (BACK.includes(reason.toLowerCase())) continue;
+      if (BACK.includes(word(reason))) continue;
       await skip(reason || undefined);
       terminal.line(''); terminal.line(`  ${style.amber('↷')} ${t(language, 'terminal.skip.done')}`);
       return 3;
@@ -250,7 +252,7 @@ async function finish(terminal, { waitingGit, more, ask, isCommit }) {
     terminal.line(`  ${style.strong(t(language, isCommit ? 'terminal.consent.continueCommit' : 'terminal.consent.continuePush'))}`);
     terminal.line(style.muted(wrapText(t(language, isCommit ? 'terminal.consent.explainCommit' : 'terminal.consent.explainPush'), terminal.width, '  ')));
     for (;;) {
-      const choice = plain(await ask(`  ${style.amber('›')} ${t(language, 'terminal.consent.prompt')} `)).trim().toLowerCase();
+      const choice = word(plain(await ask(`  ${style.amber('›')} ${t(language, 'terminal.consent.prompt')} `)).trim());
       if (CONTINUE.includes(choice)) break;
       if (STOP.includes(choice)) {
         terminal.line('');

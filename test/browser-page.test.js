@@ -524,6 +524,10 @@ test('the page renders in Korean from the first Korean state', async () => {
   assert.equal(p.nodes.waiting.textContent, `${ko('page.waiting.passPush')} ${ko('page.waiting.closingStopPush')}`);
 });
 
+test('the html lang value is escaped', () => {
+  assert.match(browserPage({ token: 'fixture-token', nonce: 'fixture-nonce', language: 'x"><b>' }), /<html lang="x&quot;&gt;&lt;b&gt;">/u);
+});
+
 test('a Korean page served in Korean starts in Korean', () => {
   const html = browserPage({ token: 'fixture-token', nonce: 'fixture-nonce', language: 'ko' }), markup = html.split('<script')[0];
   assert.match(html, /^<!doctype html>\n<html lang="ko">/u);
