@@ -117,6 +117,19 @@ test('missing clients, headless sessions, and evaluator contexts give actionable
   assert.deepEqual(await activateIntegrations({ ...f.options, agents: [], launch }), { results: [] });
 });
 
+test('on Windows nothing is opened, and every agent gets the note to start a new Claude Code session', async t => {
+  const f = await fixture(t);
+  const note = 'Sphinx does not open clients on Windows. Start a new Claude Code session in this repository to load Sphinx.';
+  const never = () => assert.fail('nothing may be looked up or launched on Windows');
+  const bare = await activateIntegrations({ cwd: f.cwd, env: {}, platform: 'win32', agents: ['claude'], findExecutable: never, launch: never });
+  assert.equal(bare.results[0].status, 'unavailable');
+  assert.equal(bare.results[0].detail, note);
+  // A display being set changes nothing: no client is looked up or launched.
+  const all = await activateIntegrations({ ...f.options, platform: 'win32', agents: ['claude', 'codex'], findExecutable: never, launch: never });
+  assert.deepEqual(all.results.map(row => [row.agent, row.status, row.detail]), [['claude', 'unavailable', note], ['codex', 'unavailable', note]]);
+  await assert.rejects(readdir(path.join(f.home, 'activations')), { code: 'ENOENT' });
+});
+
 test('terminal acceptance alone is insufficient and timed-out startup cleans records and the environment socket', async t => {
   const f = await fixture(t); let socket;
   const result = await activateIntegrations({ ...f.options, agents: ['claude'], timeoutMs: 10, launch: async () => true, environmentBridge: async (...args) => { const bridge = await createTerminalEnvironmentBridge(...args); socket = bridge.socketPath; return bridge; } });

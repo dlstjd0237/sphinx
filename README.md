@@ -29,7 +29,8 @@ Questions cover behavior, failure modes, and invariants rather than file names o
 
 ## Before you install
 
-- **Requirements.** Node.js 22.19 or newer, Git, and macOS, Linux, or WSL. Native Windows is not supported yet.
+- **Requirements.** Node.js 22.19 or newer, Git, and macOS, Linux, or WSL.
+- **Native Windows.** You also need Git for Windows. Sphinx installs Git hooks and asks its questions in a browser page. The only coding-agent integration is Claude Code, and it is opt-in: `sphinx install --agents claude`. That integration needs Claude Code to find Git Bash: Git for Windows in its default folder, or `CLAUDE_CODE_GIT_BASH_PATH` pointing at `bash.exe`. Without it, Claude Code runs hooks in PowerShell and Sphinx's hooks fail with non-blocking hook errors. Reviewers are `claude.exe` or `codex.exe` from the native installers, OpenRouter, or an OpenAI-compatible endpoint. A CLI installed only through npm (`claude.cmd`) can't be started.
 - **It applies to every repository on this machine.** `sphinx install` sets your global Git `core.hooksPath`. Your existing hooks still run first. Right after install, pushes to `main` or `master` in any repository are checked. `sphinx init` lets you adjust that for each repository.
 - **It blocks Git.** A matching push waits until you pass, pause, or skip, for up to 25 minutes. Your coding agent's shell may time out sooner.
 - **You need a reviewer model account.** This can be a signed-in Codex or Claude Code CLI, which uses that plan's allowance. It can also be an OpenRouter API key, which bills separately and is required even for free models, or any [OpenAI-compatible endpoint](docs/configuration.md#openai-compatible-endpoints). Sphinx has no account or hosted service of its own.
@@ -61,11 +62,11 @@ You should see:
 
 Use `--preset codex-economy` for Codex, or `--agents none` if you don't use a coding agent. Other presets, OpenRouter, OpenAI-compatible endpoints, and custom routes are covered in [configuration](docs/configuration.md#reviewer-models).
 
-Settings files symlinked into a dotfiles repository (Stow, Dotbot, chezmoi, home-manager) are supported: Sphinx edits the link's target in place and keeps the link. Hooks call the `sphinx` command your package manager installed (npm, pnpm, yarn, or Bun), so upgrading the package keeps them working.
+Settings files symlinked into a dotfiles repository (Stow, Dotbot, chezmoi, home-manager) are supported: Sphinx edits the link's target in place and keeps the link. Hooks call the `sphinx` command your package manager installed (npm, pnpm, yarn, or Bun), so upgrading the package keeps them working. On native Windows they start `node.exe` and Sphinx's CLI file by path instead, so run `sphinx install` again after an upgrade that moves either one: a pnpm update to a new version does, since each version gets its own folder and the old one is deleted, and so does removing the Node version that a version manager installed Sphinx under. npm's global folder keeps its path. `sphinx doctor` tells you when a file has moved and which install to run.
 
 ### 2. Load Sphinx in your coding agent (required if you use one)
 
-Guided setup opens your selected agents in fresh sessions. Then:
+Guided setup opens your selected agents in fresh sessions. Sphinx does not open clients on Windows. Start a new Claude Code session in this repository to load Sphinx. For each agent you use:
 
 - **Codex:** open `/hooks` and trust the Sphinx hooks. Sphinx cannot do or verify this for you.
 - **Claude Code:** start a new session. `/mcp` should show `sphinx` connected.
@@ -117,7 +118,7 @@ Sphinx questionnaire: http://127.0.0.1:56114/fSdZM7yg…
 Sphinx: questionnaire opened in a background browser tab. Your coding window stays in place.
 ```
 
-On macOS, the page opens in a background browser tab. On Linux, WSL, and over SSH, Git prints `open the local URL above` instead, so open the printed address yourself. From a remote session, forward the same port and open the URL unchanged, or run `sphinx check`; see [remote machines](docs/integrations.md#remote-machines-ssh-and-ci). Questions can take a moment while the reviewer reads the change, and the page shows its progress as it works. Beside each question, the page shows the checkpoint's changed files, lines added and removed, a browsable diff, and the code locations the reviewer read for that question. Answer each question with a prediction and a short reason. When you pass, or the reviewer finds nothing to ask, choose **Continue push** or **Stop push**. Continue lets the same push go through:
+On macOS and Windows, the page opens in your default browser by itself: in front on Windows and for GUI Git clients on macOS, in a background tab for macOS terminals and coding agents. A GUI client such as Fork, Sourcetree, or GitHub Desktop shows little while Git waits, so that page is your cue; see [GUI Git clients](docs/integrations.md#gui-git-clients). On Linux, WSL, and over SSH, Git prints `open the local URL above` instead, so open the printed address yourself. From a remote session, forward the same port and open the URL unchanged, or run `sphinx check`; see [remote machines](docs/integrations.md#remote-machines-ssh-and-ci). Questions can take a moment while the reviewer reads the change, and the page shows its progress as it works. Beside each question, the page shows the checkpoint's changed files, lines added and removed, a browsable diff, and the code locations the reviewer read for that question. Answer each question with a prediction and a short reason. When you pass, or the reviewer finds nothing to ask, choose **Continue push** or **Stop push**. Continue lets the same push go through:
 
 ```text
 Sphinx: understanding check complete. Continuing this Git operation.
@@ -134,11 +135,11 @@ To github.com:you/your-repo.git
 - **Dispute question.** Use this if a question's premise is wrong or ambiguous. A bad question must be corrected before that concept can pass.
 - **Stop push.** Stops the waiting push at any point before you pass: it does not go through, and your progress is saved. Run the same `git push` later to pick up where you left off. For a commit it reads **Stop commit**; with no Git operation waiting, **Pause check**.
 - **Continue or stop.** After you pass, or when no questions are needed, Git still waits for your choice. **Continue push** lets it go through. **Stop push** ends it with your pass saved, so pushing the same change again asks only whether to continue, unless the code, destination, or policy changed.
-- **Closing the tab** doesn't stop anything. Git keeps waiting, and the same address works until the 25-minute deadline.
+- **Closing the tab** doesn't stop a push from a terminal or a coding agent. Git keeps waiting, and the same address works until the 25-minute deadline. When Git runs from a GUI client, or on Windows with neither a terminal nor a coding agent, the push stops 3 minutes after every Sphinx tab is closed; your progress is saved. Git Bash's default MinTTY window counts as no terminal, so the stop applies there; see the Windows notes in [GUI Git clients](docs/integrations.md#gui-git-clients).
 - **Skip this time.** Lets the push through immediately, even while the review is still running. Skips never count as passing.
 - **`sphinx yolo`** turns checks off for the current repository, or globally when run outside one. Run it again to turn checks back on. A repository's own setting wins over the global one, so turning yolo off inside a repository keeps checks on there even while global yolo is on. `--reason "prod hotfix"` is optional.
 - **`sphinx check`** runs the same check in your terminal instead of the browser.
-- **Headless or terminal-first.** Over SSH, or anywhere Sphinx can't open the browser in the background, the questions appear right in the terminal where you ran `git push`. Type `/hint`, `/learn`, `/dispute <reason>`, `/skip`, or `/stop` (`/quit` also works) there, and `continue` or `stop` after you pass. To always use the terminal, run `sphinx config --interface terminal`; to always use the browser, use `--interface browser`.
+- **Headless or terminal-first.** Over SSH, or anywhere Sphinx can't open the browser by itself, the questions appear right in the terminal where you ran `git push`. Type `/hint`, `/learn`, `/dispute <reason>`, `/skip`, or `/stop` (`/quit` also works) there, and `continue` or `stop` after you pass. To always use the terminal, run `sphinx config --interface terminal`; to always use the browser, use `--interface browser`. Native Windows has no inline terminal check, so it uses the browser either way: the page opens by itself, and over SSH Git prints its address instead.
 - **On GitHub.** With the GitHub CLI (`gh`) signed in, a pass stamps the pushed commit. For a push to a pull request branch, the questionnaire offers "Post the Sphinx stamp to the pull request": a comment summarising the questions and first-try results. Add the Sphinx Action to a repository (`sphinx init --github-check`) and its pull requests show a **Sphinx** check: stamped with that summary, or neutral until the author passes. None of this ever blocks a push. See [GitHub stamps and the Sphinx check](docs/configuration.md#github-commit-status-and-pull-requests).
 
 Every skip and yolo toggle is logged with its reason, and `sphinx status` lists recent ones. If Git exited before you finished, for example because your agent's shell timed out, run the push once more. Never start a second copy while one is still waiting. For more cases, see [troubleshooting](docs/integrations.md#troubleshooting).
@@ -285,7 +286,7 @@ These live in `config.json`, and most can be set with `sphinx config`:
 | Setting | Flag | What it means |
 | --- | --- | --- |
 | `models` | `--preset`, `--small`, `--medium`, `--large` | The reviewer for each change size |
-| `interface` | `--interface` | Where questions appear. `auto` (default): the browser on a local Mac, otherwise the terminal you pushed from. Or `browser` / `terminal` |
+| `interface` | `--interface` | Where questions appear. `auto` (default): the browser on a local Mac or on Windows, otherwise the terminal you pushed from. Or `browser` / `terminal` |
 | `maxModelCalls` | `--max-model-calls` | Optional cap on model requests per check (1–100, or `unlimited`, the default) |
 | `maxOutputTokens` | `--max-output-tokens` | Output allowance per request, including reasoning (default 4096) |
 | `allowPaid` | `--allow-paid` | Lets OpenRouter use paid models |

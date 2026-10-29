@@ -1,11 +1,11 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFile, spawnSync } from 'node:child_process';
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { commitSnapshot, manualSnapshot, matches, pushSnapshots, repository, revalidateSnapshot } from '../src/git.js';
+import { commitSnapshot, gitSharingConsole, manualSnapshot, matches, pushSnapshots, repository, revalidateSnapshot } from '../src/git.js';
 
 const exec = promisify(execFile);
 const home = await mkdtemp(join(tmpdir(), 'sphinx-git-home-'));
@@ -192,6 +192,108 @@ test('manual check uses live remote and upstream destination, matching pre-push 
   assert.equal(manual.id, hook.id);
   assert.equal(manual.target.remote, 'upstream');
   assert.equal(manual.base, base);
+});
+
+function useEnv(t, values) {
+  for (const [key, value] of Object.entries(values)) {
+    const previous = process.env[key];
+    t.after(() => { if (previous === undefined) delete process.env[key]; else process.env[key] = previous; });
+    process.env[key] = value;
+  }
+}
+
+// git ls-remote is the one command here that can ask the person at the terminal something (ssh's passphrase or host-key question).
+// With windowsHide and every stdio piped, libuv starts a Windows child in a console of its own that has no window, so for a person at a
+// terminal that child shares our stdin and keeps their console. Injecting the platform and the terminal makes this path run on every OS.
+test('a Windows terminal user gets the same manual check and the same failure when git ls-remote shares their console', async t => {
+  const cwd = await fixture(t);
+  const remote = await mkdtemp(join(tmpdir(), 'sphinx-remote-'));
+  const isolated = await mkdtemp(join(tmpdir(), 'sphinx-config-'));
+  t.after(() => rm(remote, { recursive: true, force: true }));
+  t.after(() => rm(isolated, { recursive: true, force: true }));
+  await writeFile(join(isolated, 'gitconfig'), '');
+  useEnv(t, { GIT_CONFIG_GLOBAL: join(isolated, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1' });
+  await command(remote, 'init', '--bare');
+  await command(cwd, 'remote', 'add', 'upstream', remote);
+  await commit(cwd, { 'a.txt': 'base\n' });
+  await command(cwd, 'push', '--set-upstream', 'upstream', 'main');
+  // The remote's main moves on without this clone's remote-tracking branch hearing of it, so only ls-remote knows where it is.
+  const moved = await commit(cwd, { 'a.txt': 'moved\n' });
+  await command(cwd, 'push', 'upstream', 'main:refs/heads/side');
+  await command(remote, 'update-ref', 'refs/heads/main', moved);
+  await commit(cwd, { 'a.txt': 'new\n' });
+  const usual = await manualSnapshot({ cwd, config: defaults });
+  const shared = await manualSnapshot({ cwd, config: defaults, platform: 'win32', isTTY: true });
+  assert.equal(usual.base, moved);
+  assert.equal(shared.base, moved);
+  assert.equal(shared.id, usual.id);
+  await command(cwd, 'remote', 'set-url', '--push', 'upstream', join(remote, 'missing'));
+  for (const options of [{}, { platform: 'win32', isTTY: true }]) {
+    await assert.rejects(manualSnapshot({ cwd, config: defaults, ...options }), error => error.message.startsWith('Git ls-remote failed: ') && error.message.includes('missing'));
+  }
+});
+
+// spawn's own timeout kills git only, and the close would then wait for the ssh that git started, which still holds git's pipes (with
+// the cmd\git.exe launcher of Windows, the real git outlives the kill as well). The limit of a person who never answers has to drop the
+// pipes too. The fake ssh sleeps past the limit; git runs in the temp folder, which the survivors may keep as their working folder.
+test('git that nobody answers is stopped at its limit even while the ssh it started holds its pipes', async t => {
+  const work = await mkdtemp(join(tmpdir(), 'sphinx-slow-ssh-'));
+  t.after(() => rm(work, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 }));
+  await writeFile(join(work, 'gitconfig'), '');
+  await writeFile(join(work, 'sleep.mjs'), 'setTimeout(() => {}, 2500);\n');
+  useEnv(t, {
+    GIT_CONFIG_GLOBAL: join(work, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1', GIT_SSH_COMMAND: '"$SPHINX_TEST_NODE" "$SPHINX_TEST_SLEEP"',
+    SPHINX_TEST_NODE: process.execPath, SPHINX_TEST_SLEEP: join(work, 'sleep.mjs'),
+  });
+  const started = Date.now();
+  await assert.rejects(
+    gitSharingConsole(tmpdir(), ['ls-remote', '--', 'ssh://git@sphinx-test.invalid/repo.git', 'refs/heads/main'], 500),
+    /^Error: Git ls-remote failed: it did not finish within 0\.5 seconds$/,
+  );
+  assert.ok(Date.now() - started < 1500, 'it must not wait for the ssh that holds the pipes');
+});
+
+// The fake ssh sets the console title and exits. A console shared with this process shows the new title when a fresh process reads
+// it back; a console of the child's own does not. Fresh processes do the reading and setting because a process caches the title it read.
+test('on Windows git ls-remote shares the console of a person at the terminal, so ssh can ask its question, and not that of an unattended run', { skip: process.platform !== 'win32' }, async t => {
+  const cwd = await fixture(t);
+  await commit(cwd, { 'a.txt': 'base\n' });
+  await command(cwd, 'remote', 'add', 'origin', 'ssh://git@sphinx-test.invalid/repo.git');
+  const tools = await mkdtemp(join(tmpdir(), 'sphinx-ssh-'));
+  t.after(() => rm(tools, { recursive: true, force: true }));
+  const setter = join(tools, 'set-title.mjs');
+  await writeFile(setter, 'process.title = process.env.SPHINX_TEST_TITLE;\nprocess.exit(255);\n');
+  await writeFile(join(tools, 'gitconfig'), '');
+  useEnv(t, {
+    GIT_CONFIG_GLOBAL: join(tools, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1', GIT_SSH_COMMAND: '"$SPHINX_TEST_NODE" "$SPHINX_TEST_SETTER"',
+    SPHINX_TEST_NODE: process.execPath, SPHINX_TEST_SETTER: setter, SPHINX_TEST_TITLE: 'sphinx-console-probe',
+  });
+  const readTitle = () => spawnSync(process.execPath, ['-p', 'process.title'], { encoding: 'utf8' }).stdout.trim();
+  const setTitle = title => spawnSync(process.execPath, ['-e', 'process.title = process.argv[1]', title]);
+  const original = readTitle();
+  t.after(() => setTitle(original));
+  spawnSync(process.execPath, [setter]);
+  if (readTitle() !== 'sphinx-console-probe') return t.skip('this process has no console whose title it can read back');
+  const titleAfter = async (isTTY, title) => {
+    setTitle(original);
+    process.env.SPHINX_TEST_TITLE = title;
+    await assert.rejects(manualSnapshot({ cwd, config: defaults, remote: 'origin', branch: 'main', isTTY }), /^Error: Git ls-remote failed/);
+    return readTitle();
+  };
+  assert.equal(await titleAfter(true, 'sphinx-terminal-user'), 'sphinx-terminal-user', 'a person at the terminal must keep the console that ssh asks on');
+  assert.equal(await titleAfter(false, 'sphinx-unattended'), original, 'an unattended run still gets a console of its own, which has no window');
+});
+
+// Without a session tag, a questionnaire that Git queued reaches Claude Code's post-tool hook only if both name the same repository root.
+// On Windows the hook's folder and Git's can be spelled differently (drive letter case, slash direction), so every spelling has to give one root.
+test('on Windows a lower-case drive letter and forward slashes name the same repository root', { skip: process.platform !== 'win32' }, async t => {
+  const original = await realpath(await fixture(t));
+  // Only the drive letter in lower case, as in c:/Users/..., and the whole path in lower case, as in c:/users/...
+  for (const spelling of [original.replace(/^[A-Z]/, letter => letter.toLowerCase()), original.toLowerCase()]) {
+    const variant = spelling.replaceAll('\\', '/');
+    assert.match(variant, /^[a-z]:\/[^\\]+$/, 'the spelling differs from the original in the drive letter and the slashes');
+    assert.equal((await repository(variant)).root, (await repository(original)).root, variant);
+  }
 });
 
 test('never runs configured external diff or textconv', async t => {

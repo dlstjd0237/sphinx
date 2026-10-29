@@ -17,7 +17,8 @@ if (global && !(env.CI && !['false', '0'].includes(env.CI))) {
     ? `\n  ${amber('sphinx')} updated. Apply it to your Git and agent hooks (your settings are kept):\n\n    ${bold('sphinx install')}\n\n`
     : `\n  ${amber('sphinx')} is installed. Finish setup to connect Git and your coding agents:\n\n    ${bold('sphinx install')}\n\n`;
   try {
-    const tty = openSync(process.platform === 'win32' ? 'CON' : '/dev/tty', 'w');
+    // Not 'CON': Node turns that into \\?\<cwd>\CON, a regular file. CONOUT$ opens the console, or fails when there is none.
+    const tty = openSync(process.platform === 'win32' ? '\\\\.\\CONOUT$' : '/dev/tty', 'w');
     try { writeSync(tty, message); } finally { closeSync(tty); }
   } catch { /* No terminal: nothing to show. */ }
 }

@@ -32,11 +32,11 @@ function gitOptions(env) {
 const gitArgs = args => ['--no-pager', '--literal-pathspecs', '-c', 'core.fsmonitor=false', ...args];
 async function metadata(root, args, env) {
   try {
-    return (await exec('git', gitArgs(args), { cwd: root, env: gitOptions(env), encoding: 'utf8', timeout: 30000, maxBuffer: 32 * 1024 * 1024 })).stdout;
+    return (await exec('git', gitArgs(args), { cwd: root, env: gitOptions(env), encoding: 'utf8', timeout: 30000, maxBuffer: 32 * 1024 * 1024, windowsHide: true })).stdout;
   } catch { fail('GIT_UNAVAILABLE', 'The immutable Git metadata is unavailable. Retry the Git operation.'); }
 }
 async function* gitChunks(root, args, env) {
-  const child = spawn('git', gitArgs(args), { cwd: root, env: gitOptions(env), stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn('git', gitArgs(args), { cwd: root, env: gitOptions(env), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   child.stderr.resume(); // Never expose Git diagnostics, paths, or external configuration to the reviewer.
   let ended = false, stopped = false;
   const done = new Promise((resolve, reject) => {

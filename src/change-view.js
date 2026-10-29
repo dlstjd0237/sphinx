@@ -22,7 +22,7 @@ const decoder = () => new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 async function git(root, args, { env, buffer = false, maxBuffer = 16 * 1024 * 1024 } = {}) {
   try {
     const { stdout } = await exec('git', ['--no-pager', '--literal-pathspecs', '-c', 'core.fsmonitor=false', ...args], {
-      cwd: root, encoding: buffer ? 'buffer' : 'utf8', maxBuffer, timeout: 30000,
+      cwd: root, encoding: buffer ? 'buffer' : 'utf8', maxBuffer, timeout: 30000, windowsHide: true,
       env: { ...process.env, ...env, GIT_OPTIONAL_LOCKS: '0', GIT_NO_REPLACE_OBJECTS: '1', GIT_TERMINAL_PROMPT: '0' },
     });
     return stdout;

@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { mkdir, open, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { loadIgnorePolicy } from './ignore.js';
-import { getPaths } from './config.js';
+import { getPaths, openNoFollow } from './config.js';
 
 export const PROJECT_CONTEXT_FILE = '.sphinxcontext.md';
 export const PROJECT_CONTEXT_MAX_BYTES = 16000;
@@ -104,7 +104,7 @@ async function loadRepositoryContext(repoRoot, { env, ignore }) {
   if (policy.matches(PROJECT_CONTEXT_FILE)) return empty('excluded');
   let handle;
   try {
-    handle = await open(path.join(repoRoot, PROJECT_CONTEXT_FILE), constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+    handle = await openNoFollow(path.join(repoRoot, PROJECT_CONTEXT_FILE), constants.O_RDONLY);
     const info = await handle.stat();
     if (!info.isFile()) throw new Error('must be a regular file');
     if (info.size > PROJECT_CONTEXT_MAX_BYTES) throw new Error(`exceeds ${PROJECT_CONTEXT_MAX_BYTES} bytes; keep project context concise`);

@@ -1,9 +1,10 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
+import { access, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { createEvaluator, parseModelJSON, runProcess, validateQuestion, validateNewQuestion, QUESTION_SCHEMA, NEW_QUESTION_SCHEMA, GRADE_SCHEMA } from '../src/evaluator.js';
+import { delimiter, join } from 'node:path';
+import { createEvaluator, findExecutable, parseModelJSON, planProviders, runProcess, validateQuestion, validateNewQuestion, QUESTION_SCHEMA, NEW_QUESTION_SCHEMA, GRADE_SCHEMA } from '../src/evaluator.js';
 import { DEFAULT_CONFIG } from '../src/config.js';
 import { evaluatorConfig, selectRoute } from '../src/routing.js';
 import { createSessionStore } from '../src/sessions.js';
@@ -896,12 +897,50 @@ test('auto provider discovery searches the supplied PATH without executing a rea
   const directory = await mkdtemp(join(tmpdir(), 'sphinx-provider-test-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   await writeFile(join(directory, 'claude'), 'fake placeholder', { mode: 0o700 });
+  // Windows starts only .com and .exe files, so that is the name a CLI must have there.
+  await writeFile(join(directory, 'claude.exe'), 'fake placeholder', { mode: 0o755 });
   const { evaluator, calls } = await fixture(t, { questions: [question] }, { env: { PATH: directory } });
   await evaluator.generateAssessment(snapshot, { ...config, provider: 'auto' });
   assert.equal(calls[0].command, 'claude');
   const unexpected = async () => { throw new Error('Provider discovery must fail before calling a model'); };
   const missing = createEvaluator({ env: { PATH: '', SPHINX_HOME: join(directory, 'sphinx-home'), SPHINX_USER_HOME: directory }, openRouter: unexpected, openRouterTurn: unexpected });
   await assert.rejects(missing.generateAssessment(snapshot, { ...config, provider: 'auto' }), { code: 'PROVIDER_NOT_FOUND' });
+});
+
+test('on Windows only runnable .exe or .com CLIs count as installed', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'sphinx-windows-cli-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const [npm, native, both] = ['npm', 'native', 'both'].map(name => join(root, name));
+  for (const directory of [npm, native, both]) await mkdir(directory);
+  // npm leaves an extensionless sh shim and .cmd shims, none of which spawn() can start without a shell.
+  for (const name of ['claude', 'claude.cmd', 'codex.cmd']) await writeFile(join(npm, name), 'fake placeholder', { mode: 0o755 });
+  await writeFile(join(native, 'claude.exe'), 'fake placeholder', { mode: 0o755 });
+  for (const name of ['codex.exe', 'codex.com']) await writeFile(join(both, name), 'fake placeholder', { mode: 0o755 });
+  // The variable is named Path, as in a copy of the Windows environment.
+  const env = { Path: [npm, native].join(delimiter) };
+  assert.equal(await findExecutable('claude', env, 'win32'), join(native, 'claude.exe'));
+  assert.equal(await findExecutable('codex', env, 'win32'), null);
+  assert.deepEqual(await planProviders(env, 'win32'), ['claude']);
+  assert.equal(await findExecutable('codex', { PATH: both }, 'win32'), join(both, 'codex.com'), '.com is tried before .exe, as spawn() does');
+  assert.equal(await findExecutable('claude', { PATH: npm }, 'linux'), join(npm, 'claude'));
+});
+
+test('on Windows a quoted PATH entry is searched without its quotes, as spawn() searches it', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'sphinx-quoted-path-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const name of ['claude', 'claude.exe']) await writeFile(join(root, name), 'fake placeholder', { mode: 0o755 });
+  // libuv drops one quote, " or ', from each end of a PATH entry.
+  for (const quoted of [`"${root}"`, `'${root}'`]) assert.equal(await findExecutable('claude', { PATH: quoted }, 'win32'), join(root, 'claude.exe'), quoted);
+  // Elsewhere a quote is part of the directory name, as it always was.
+  assert.equal(await findExecutable('claude', { PATH: `"${root}"` }, 'linux'), null);
+});
+
+test('on Windows an empty PATH asks for the native installers', { skip: process.platform !== 'win32' }, async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'sphinx-provider-test-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const unexpected = async () => { throw new Error('Provider discovery must fail before calling a model'); };
+  const missing = createEvaluator({ env: { PATH: '', SPHINX_HOME: join(directory, 'sphinx-home'), SPHINX_USER_HOME: directory }, openRouter: unexpected, openRouterTurn: unexpected });
+  await assert.rejects(missing.generateAssessment(snapshot, { ...config, provider: 'auto' }), { code: 'PROVIDER_NOT_FOUND', message: /native installers/ });
 });
 
 test('real subprocess runner handles stdin without shell expansion', async () => {
@@ -930,6 +969,48 @@ test('real subprocess runner reports missing executable with an actionable error
     command: '/definitely-not-an-installed-sphinx-provider', args: [],
     cwd: tmpdir(), env: process.env, input: '', timeoutMs: 1000,
   }), { code: 'PROVIDER_START_FAILED' });
+});
+
+// A child that behaves like Node's: a failed start is an 'error' event once the caller listens,
+// and a CLI that stops reading stdin fails the write before it reports its exit.
+function stubChild({ startError, stdinError, exitCode }) {
+  const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), stdin: new EventEmitter(), kill() {} });
+  child.stdin.end = () => setImmediate(() => {
+    if (stdinError) child.stdin.emit('error', stdinError);
+    if (exitCode !== undefined) child.emit('close', exitCode, null);
+  });
+  if (startError) setImmediate(() => child.emit('error', startError));
+  return child;
+}
+const errorWith = code => Object.assign(new Error(`stub ${code}`), { code });
+
+test('CLI start failures become PROVIDER_START_FAILED with a Windows hint', async () => {
+  // These stand-ins never start a process; --version keeps even a leaked real start harmless.
+  const run = (command, spawnImpl, platform) => runProcess({ command, args: ['--version'], cwd: tmpdir(), env: {}, input: '', timeoutMs: 1000, spawnImpl, platform });
+  const missing = errorWith('ENOENT');
+  await assert.rejects(run('codex', () => stubChild({ startError: missing }), 'win32'), {
+    code: 'PROVIDER_START_FAILED', cause: missing,
+    message: 'Could not start codex. On Windows Sphinx runs codex.exe directly; a CLI installed only through npm (codex.cmd) is not supported yet. Use the native installer, or switch this check to another reviewer.',
+  });
+  await assert.rejects(run('codex', () => stubChild({ startError: errorWith('ENOENT') }), 'linux'), {
+    code: 'PROVIDER_START_FAILED', message: 'Could not start codex. Check that the CLI is installed and available on PATH.',
+  });
+  // spawn throws a request that is too long at once instead of emitting an event.
+  const tooLong = errorWith('ENAMETOOLONG');
+  for (const platform of ['win32', 'linux']) await assert.rejects(run('claude', () => { throw tooLong; }, platform), {
+    code: 'PROVIDER_START_FAILED', cause: tooLong,
+    message: 'This request is too long to pass to claude on this system. Switch this check to another reviewer.',
+  });
+  // Any other refusal to start keeps the general advice, whichever way it arrives.
+  await assert.rejects(run('codex', () => { throw errorWith('EACCES'); }, 'win32'), {
+    code: 'PROVIDER_START_FAILED', message: 'Could not start codex. Check that the CLI is installed and available on PATH.',
+  });
+  // A CLI that exits without reading its input is reported by its exit code, not by the failed write.
+  for (const code of ['EPIPE', 'EOF']) {
+    const result = await run('codex', () => stubChild({ stdinError: errorWith(code), exitCode: 3 }), 'win32');
+    assert.equal(result.exitCode, 3, `${code} on stdin must not hide the exit code`);
+  }
+  await assert.rejects(run('codex', () => stubChild({ stdinError: errorWith('EACCES'), exitCode: 1 }), 'win32'), { code: 'PROVIDER_INPUT_FAILED' });
 });
 
 test('a correct grade may return empty feedback, and an incorrect one without an explanation says so', async t => {

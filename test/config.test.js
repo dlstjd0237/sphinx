@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { mkdir, mkdtemp, open, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_CONFIG, getPaths, loadConfig, openRouterKey, policyHash, repositoryConfigInfo, saveConfig, saveOpenRouterKey, stableStringify, validateConfig, writeJson } from '../src/config.js';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { DEFAULT_CONFIG, getPaths, loadConfig, openNoFollow, openRouterKey, policyHash, readJson, renameWithRetry, repositoryConfigInfo, saveConfig, saveOpenRouterKey, stableStringify, validateConfig, writeJson } from '../src/config.js';
 
 async function fixture(t) {
   const directory = await mkdtemp(join(tmpdir(), 'sphinx-config-test-'));
@@ -250,4 +252,122 @@ test('understanding distance defaults to mixed, accepts high and low, and a repo
   t.after(() => rm(dir, { recursive: true, force: true }));
   await writeFile(join(dir, '.sphinxconfig'), JSON.stringify({ version: 1, distance: 'low' }));
   assert.equal((await loadConfig(dir, { SPHINX_HOME: join(dir, 'home') })).distance, 'low');
+});
+
+// A rename that fails with `code` for its first `failures` calls (Infinity: always), then succeeds.
+function flakyRename(failures, code = 'EPERM') {
+  const stub = async () => {
+    stub.calls += 1;
+    if (stub.calls <= failures) throw Object.assign(new Error(`${code}: rename refused`), { code });
+  };
+  stub.calls = 0;
+  return stub;
+}
+
+test('a rename that Windows refuses while the file is open is retried until it works, on Windows only', async () => {
+  for (const code of ['EPERM', 'EACCES', 'EBUSY']) {
+    const flaky = flakyRename(2, code);
+    await renameWithRetry('from', 'to', { platform: 'win32', renameImpl: flaky });
+    assert.equal(flaky.calls, 3, code);
+  }
+  const posix = flakyRename(2);
+  await assert.rejects(renameWithRetry('from', 'to', { platform: 'linux', renameImpl: posix }), { code: 'EPERM' });
+  assert.equal(posix.calls, 1);
+});
+
+test('an aborted signal stops the rename retries with its AbortError after the first failure', async () => {
+  const refusing = flakyRename(Infinity);
+  await assert.rejects(renameWithRetry('from', 'to', { signal: AbortSignal.abort(), platform: 'win32', renameImpl: refusing }), { name: 'AbortError' });
+  assert.equal(refusing.calls, 1);
+});
+
+test('an abort while a rename retry waits rejects with the abort reason, so Ctrl+C keeps its cancel message', async () => {
+  const controller = new AbortController();
+  const reason = Object.assign(new Error('Cancelled. No further changes were made.'), { code: 'SPHINX_CANCELLED', exitCode: 130 });
+  const refusing = flakyRename(Infinity);
+  // The abort comes once the first wait has begun.
+  const renameImpl = async (...args) => { if (!refusing.calls) setImmediate(() => controller.abort(reason)); return refusing(...args); };
+  await assert.rejects(renameWithRetry('from', 'to', { signal: controller.signal, platform: 'win32', renameImpl }), error => error === reason);
+  assert.equal(refusing.calls, 1);
+});
+
+test('rename retries give up after their attempts with the last error, and other errors are not retried', async () => {
+  const stuck = flakyRename(Infinity, 'EBUSY');
+  await assert.rejects(renameWithRetry('from', 'to', { platform: 'win32', attempts: 3, renameImpl: stuck }), { code: 'EBUSY' });
+  assert.equal(stuck.calls, 3);
+  const missing = flakyRename(Infinity, 'ENOENT');
+  await assert.rejects(renameWithRetry('from', 'to', { platform: 'win32', renameImpl: missing }), { code: 'ENOENT' });
+  assert.equal(missing.calls, 1);
+});
+
+test('saving a state file waits out a handle that holds it open on Windows', { skip: process.platform !== 'win32' }, async t => {
+  const { directory } = await fixture(t);
+  const target = join(directory, 'state.json');
+  await writeFile(target, '{}\n');
+  // Windows refuses to rename over a file while any handle on it is open, even a reader's.
+  const reader = await open(target, 'r');
+  const release = sleep(300).then(() => reader.close());
+  try { await writeJson(target, { a: 1 }); } finally { await release; }
+  assert.deepEqual(JSON.parse(await readFile(target, 'utf8')), { a: 1 });
+});
+
+test('aborting a save that waits on an open handle stops it with the old file kept and no temporary file left', { skip: process.platform !== 'win32' }, async t => {
+  const { directory } = await fixture(t);
+  const target = join(directory, 'state.json');
+  await writeFile(target, '{}\n');
+  const reader = await open(target, 'r');
+  const controller = new AbortController();
+  try {
+    const saving = assert.rejects(writeJson(target, { a: 1 }, { signal: controller.signal }), { name: 'AbortError' });
+    await sleep(50);
+    controller.abort();
+    await saving;
+  } finally { await reader.close(); }
+  assert.equal(await readFile(target, 'utf8'), '{}\n');
+  assert.deepEqual((await readdir(directory)).filter(name => name.endsWith('.tmp')), []);
+});
+
+// Creating a symlink needs Developer Mode or elevation on Windows; skip the test where the account may not.
+async function linkOrSkip(t, target, link) {
+  try { await symlink(target, link); return true; } catch (error) {
+    if (error.code !== 'EPERM') throw error;
+    t.skip('this account may not create symlinks');
+    return false;
+  }
+}
+
+test('openNoFollow refuses a symlink with ELOOP where the platform has no O_NOFOLLOW, and never creates through one', async t => {
+  const { directory } = await fixture(t);
+  const target = join(directory, 'target.txt'), link = join(directory, 'link.txt'), dangling = join(directory, 'dangling.txt'), beyond = join(directory, 'beyond.txt');
+  await writeFile(target, 'PRIVATE_TARGET');
+  if (!await linkOrSkip(t, target, link) || !await linkOrSkip(t, beyond, dangling)) return;
+  // { nofollow: 0 } is how Windows runs: with no O_NOFOLLOW to pass, lstat decides before the open.
+  await assert.rejects(openNoFollow(link, constants.O_RDONLY, undefined, { nofollow: 0 }), { code: 'ELOOP', message: `Refusing to open a symlink: ${link}` });
+  await assert.rejects(openNoFollow(dangling, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT, 0o600, { nofollow: 0 }), { code: 'ELOOP' });
+  await assert.rejects(stat(beyond), { code: 'ENOENT' }, 'a creating open must not create the target of a dangling link');
+  // Without options each platform refuses in its own way: the kernel with O_NOFOLLOW, or the same lstat check.
+  await assert.rejects(openNoFollow(link, constants.O_RDONLY), { code: 'ELOOP' });
+});
+
+test('a JSON file that is a symlink is refused by its error code, and a regular one still reads', async t => {
+  const { directory } = await fixture(t);
+  const target = join(directory, 'target.json'), link = join(directory, 'link.json');
+  await writeFile(target, '{"secret":"PRIVATE_TARGET"}');
+  assert.deepEqual(await readJson(target), { secret: 'PRIVATE_TARGET' });
+  if (!await linkOrSkip(t, target, link)) return;
+  await assert.rejects(readJson(link, {}), { message: `Cannot read ${link}: ELOOP` });
+});
+
+test('openNoFollow opens a regular file, and leaves a missing file to open so only O_CREAT creates it', async t => {
+  const { directory } = await fixture(t);
+  const file = join(directory, 'regular.txt'), created = join(directory, 'created.txt');
+  await writeFile(file, 'content');
+  for (const options of [{ nofollow: 0 }, undefined]) {
+    const handle = await openNoFollow(file, constants.O_RDONLY, undefined, options);
+    try { assert.equal(await handle.readFile('utf8'), 'content'); } finally { await handle.close(); }
+    await assert.rejects(openNoFollow(created, constants.O_RDONLY, undefined, options), { code: 'ENOENT' });
+  }
+  const handle = await openNoFollow(created, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT, 0o600, { nofollow: 0 });
+  try { await handle.writeFile('new'); } finally { await handle.close(); }
+  assert.equal(await readFile(created, 'utf8'), 'new');
 });

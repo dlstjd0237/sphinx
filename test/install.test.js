@@ -1,16 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, rm, chmod, symlink, lstat } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm, chmod, symlink, lstat, copyFile } from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawn, execFileSync } from 'node:child_process';
-import { install, uninstall, doctor, dispatchHook, detectAgents } from '../src/install.js';
+import { spawn, spawnSync, execFileSync } from 'node:child_process';
+import { install, uninstall, doctor, dispatchHook, detectAgents, checkAgentPlatform, WINDOWS_AGENT_HINT } from '../src/install.js';
 import { getPaths } from '../src/config.js';
+import { nativeHookSpecs } from '../src/agent-settings.js';
 import { lifecycleHome } from '../src/lifecycle-integrations.js';
+import { RUN_HOOK, msys2Quote } from '../src/windows.js';
 
-async function fixture(t) {
-  const base = await mkdtemp(path.join(tmpdir(), "sphinx install ' "));
+async function fixture(t, { prefix = "sphinx install ' " } = {}) {
+  const base = await mkdtemp(path.join(tmpdir(), prefix));
   t.after(() => rm(base, { recursive: true, force: true }));
   const home = path.join(base, 'home');
   const repo = path.join(base, 'repository');
@@ -30,6 +33,15 @@ async function fixture(t) {
 async function executable(file, content) { await mkdir(path.dirname(file), { recursive: true }); await writeFile(file, content, { mode: 0o755 }); await chmod(file, 0o755); }
 const json = async file => JSON.parse(await readFile(file, 'utf8'));
 
+// Git for Windows runs a hook with its own usr\bin first on PATH, and that is where the hook's `sh` comes from.
+// A test that calls dispatchHook itself on Windows has to put it there too. `git --exec-path` is <root>\mingw64\libexec\git-core.
+const gitShellPath = () => path.resolve(execFileSync('git', ['--exec-path'], { encoding: 'utf8' }).trim(), '..', '..', '..', 'usr', 'bin');
+function prependPath(env, ...directories) {
+  const key = 'PATH' in env ? 'PATH' : Object.keys(env).find(name => name.toUpperCase() === 'PATH') ?? 'PATH'; // a copied env may spell it `Path`
+  return { ...env, [key]: [...directories, env[key]].filter(Boolean).join(path.delimiter) };
+}
+const withGitShell = env => process.platform === 'win32' ? prependPath(env, gitShellPath()) : env;
+
 test('Cursor, OpenCode and Pi install together, preserve user settings, and uninstall idempotently', async t => {
   const f = await fixture(t);
   const cursorHome = lifecycleHome('cursor', f.paths, f.env), openCodeHome = lifecycleHome('opencode', f.paths, f.env);
@@ -39,17 +51,17 @@ test('Cursor, OpenCode and Pi install together, preserve user settings, and unin
   await writeFile(cursorFile, JSON.stringify(existing));
   const jsonc = '// Keep comments\n{"model":"my/model", "plugin":["my-plugin"]}\n';
   await writeFile(openCodeConfig, jsonc);
-  const result = await install({ ...f.options, agents: 'cursor,opencode,pi' });
+  const result = await install({ ...f.options, agents: 'cursor,opencode,pi', platform: 'linux' });
   assert.deepEqual(result.agents, ['cursor', 'opencode', 'pi']);
   assert.deepEqual(result.warnings, []);
   assert.match(result.messages.join('\n'), /Pi extension installed with native/);
-  await install({ ...f.options, agents: 'cursor,opencode,pi' });
+  await install({ ...f.options, agents: 'cursor,opencode,pi', platform: 'linux' });
   const cursor = await json(cursorFile);
   assert.equal(cursor.hooks.sessionStart.length, 2);
   assert.equal(cursor.hooks.postToolUse.length, 1);
   assert.equal(cursor.hooks.postToolUseFailure[0].matcher, '^Shell$');
   assert.equal(await readFile(openCodeConfig, 'utf8'), jsonc);
-  assert.equal((await doctor(f.options)).checks.every(check => check.ok), true);
+  assert.equal((await doctor({ ...f.options, platform: 'linux' })).checks.every(check => check.ok), true);
   const manifest = await json(f.paths.install);
   assert.match(await readFile(manifest.agents.opencode.file, 'utf8'), /registerOpenCodeIntegration/);
   assert.match(await readFile(manifest.agents.pi.file, 'utf8'), /registerPiIntegration/);
@@ -63,10 +75,10 @@ test('Cursor, OpenCode and Pi install together, preserve user settings, and unin
 test('new Cursor settings disappear on uninstall and auto detection finds all supported agent homes', async t => {
   const f = await fixture(t);
   for (const directory of [f.paths.codexHome, f.paths.claudeHome, lifecycleHome('cursor', f.paths, f.env), lifecycleHome('opencode', f.paths, f.env), path.join(f.home, '.pi', 'agent')]) await mkdir(directory, { recursive: true });
-  assert.deepEqual(await detectAgents(f.options), ['codex', 'claude', 'pi', 'cursor', 'opencode']);
+  assert.deepEqual(await detectAgents({ ...f.options, platform: 'linux' }), ['codex', 'claude', 'pi', 'cursor', 'opencode']);
   await assert.rejects(readFile(f.paths.install), { code: 'ENOENT' });
   assert.throws(() => f.git('config', '--global', '--get', 'core.hooksPath'));
-  await install({ ...f.options, agents: 'auto' });
+  await install({ ...f.options, agents: 'auto', platform: 'linux' });
   const manifest = await json(f.paths.install);
   assert.deepEqual(Object.keys(manifest.agents).sort(), ['claude', 'codex', 'cursor', 'opencode', 'pi']);
   await uninstall(f.options);
@@ -160,12 +172,282 @@ test('gated hooks preserve stdin and arguments and do not bypass an original rej
   await executable(path.join(f.repo, '.git/hooks/pre-push'), '#!/bin/sh\nprintf "%s\\n" "$@" > "$SPHINX_TEST_OUTPUT"\ncat >> "$SPHINX_TEST_OUTPUT"\nexit 19\n');
   await install(f.options);
   let calls = 0;
-  assert.equal(await dispatchHook({ event: 'pre-push', args: ['origin', 'url with spaces'], input: 'refs/heads/main 123 refs/heads/main 456\n', cwd: f.repo, env: { ...f.env, SPHINX_TEST_OUTPUT: output }, gate: async () => { calls++; return 0; } }), 19);
+  assert.equal(await dispatchHook({ event: 'pre-push', args: ['origin', 'url with spaces'], input: 'refs/heads/main 123 refs/heads/main 456\n', cwd: f.repo, env: withGitShell({ ...f.env, SPHINX_TEST_OUTPUT: output }), gate: async () => { calls++; return 0; } }), 19);
   assert.equal(calls, 0);
   assert.equal(await readFile(output, 'utf8'), 'origin\nurl with spaces\nrefs/heads/main 123 refs/heads/main 456\n');
   await rm(path.join(f.repo, '.git/hooks/pre-push'));
   assert.equal(await dispatchHook({ event: 'pre-push', args: [], input: '', cwd: f.repo, env: f.env, gate: async () => 23 }), 23);
   assert.equal(await dispatchHook({ event: 'pre-commit', args: [], input: '', cwd: f.repo, env: { ...f.env, SPHINX_EVALUATOR: '1' }, gate: async () => 23 }), 0);
+});
+
+test('on Windows the original hook runs through sh with every argument quoted', async t => {
+  const f = await fixture(t);
+  await install(f.options);
+  const hook = path.join(f.git('rev-parse', '--path-format=absolute', '--git-common-dir'), 'hooks', 'pre-push');
+  await executable(hook, '#!/bin/sh\nexit 0\n');
+  const calls = [];
+  const spawnImpl = (command, args, options) => {
+    calls.push({ command, args, options });
+    const child = new EventEmitter();
+    child.stdin = { on() {}, end() {} };
+    setImmediate(() => child.emit('close', 0, null));
+    return child;
+  };
+  const args = ['origin', "D:\\x\\{a,b}\\it's.git"];
+  const run = (platform, env) => dispatchHook({ event: 'pre-push', args, input: 'refs/heads/main 123 refs/heads/main 456\n', cwd: f.repo, env, gate: async () => 0, spawnImpl, platform });
+
+  // The switch and its marker are Sphinx's own, so the user's hook gets the environment Git alone would give it.
+  const added = { ...f.env, NoDefaultCurrentDirectoryInExePath: '1', SPHINX_ADDED_NO_CWD_SEARCH: '1' };
+  assert.equal(await run('win32', added), 0);
+  const [win] = calls;
+  assert.equal(win.command, 'sh');
+  assert.deepEqual(win.args, ['-c', `${RUN_HOOK}\nrun_hook "$0" "$@"`, hook.replaceAll('\\', '/'), ...args].map(msys2Quote));
+  assert.equal(win.options.windowsVerbatimArguments, true);
+  assert.equal(win.options.cwd, f.repo);
+  assert.deepEqual(win.options.stdio, ['pipe', 'inherit', 'inherit']);
+  assert.equal(win.options.env.SPHINX_HOOK_DEPTH, '1');
+  assert.equal('NoDefaultCurrentDirectoryInExePath' in win.options.env, false);
+  assert.equal('SPHINX_ADDED_NO_CWD_SEARCH' in win.options.env, false);
+  assert.equal(added.NoDefaultCurrentDirectoryInExePath, '1', 'dispatchHook leaves the environment it was given alone');
+
+  // A switch the user set without Sphinx is theirs to keep.
+  const owned = { ...f.env, NoDefaultCurrentDirectoryInExePath: '1' };
+  delete owned.SPHINX_ADDED_NO_CWD_SEARCH;
+  assert.equal(await run('win32', owned), 0);
+  assert.equal(calls[1].options.env.NoDefaultCurrentDirectoryInExePath, '1');
+
+  // Anywhere else the hook file is started directly, exactly as before.
+  assert.equal(await run('linux', added), 0);
+  const posix = calls[2];
+  assert.equal(posix.command, hook);
+  assert.deepEqual(posix.args, args);
+  assert.equal('windowsVerbatimArguments' in posix.options, false);
+  assert.deepEqual(posix.options.env, { ...added, SPHINX_HOOK_DEPTH: '1' });
+  assert.equal(calls.length, 3);
+});
+
+test('on Windows a chained hook gets its own path with forward slashes, as Git for Windows gives it; elsewhere the path is as it is', async t => {
+  const f = await fixture(t);
+  // A hooks folder whose path has a backslash on every platform: a separator on Windows, part of a folder name elsewhere.
+  const hooks = path.join(f.base, 'old\\hooks'), hook = path.join(hooks, 'pre-push');
+  await executable(hook, '#!/bin/sh\nexit 0\n');
+  f.git('config', '--global', 'core.hooksPath', hooks);
+  await install(f.options);
+  const calls = [];
+  const spawnImpl = (command, args) => {
+    calls.push({ command, args });
+    const child = new EventEmitter();
+    child.stdin = { on() {}, end() {} };
+    setImmediate(() => child.emit('close', 0, null));
+    return child;
+  };
+  for (const platform of ['win32', 'linux']) assert.equal(await dispatchHook({ event: 'pre-push', args: ['origin', 'url'], input: '', cwd: f.repo, env: f.env, gate: async () => 0, spawnImpl, platform }), 0, platform);
+  const [win, posix] = calls;
+  // $0 of the hook: a multiplexing hook matches "${0##*/}", and one that loads a file beside itself uses "${0%/*}".
+  assert.equal(win.args[2], msys2Quote(hook.replaceAll('\\', '/')));
+  assert.doesNotMatch(win.args[2], /\\/);
+  assert.equal(posix.command, hook);
+});
+
+test('on Windows a chained hook that reads its name or folder from $0 runs as it would under Git alone', { skip: process.platform !== 'win32', timeout: 60000 }, async t => {
+  const f = await fixture(t);
+  await install(f.options);
+  const hooks = path.join(f.git('rev-parse', '--path-format=absolute', '--git-common-dir'), 'hooks'), output = path.join(f.base, 'zero');
+  const run = env => dispatchHook({ event: 'pre-push', args: ['origin', 'url'], input: 'refs/heads/main 1 refs/heads/main 2\n', cwd: f.repo, env: withGitShell(env), gate: async () => 0 });
+  // One script for several hooks picks its branch by the name it was started as; this branch rejects the push.
+  await executable(path.join(hooks, 'pre-push'), '#!/bin/sh\ncase "${0##*/}" in pre-push) exit 1 ;; esac\nexit 0\n');
+  assert.equal(await run(f.env), 1);
+  // A hook that loads a file beside it, and records the path it was given.
+  await writeFile(path.join(hooks, 'lib.sh'), 'code=5\n');
+  await executable(path.join(hooks, 'pre-push'), '#!/bin/sh\nprintf %s "$0" > "$SPHINX_TEST_OUTPUT"\n. "${0%/*}/lib.sh"\nexit "$code"\n');
+  assert.equal(await run({ ...f.env, SPHINX_TEST_OUTPUT: output }), 5);
+  const zero = await readFile(output, 'utf8');
+  assert.doesNotMatch(zero, /\\/);
+  assert.match(zero, /\/\.git\/hooks\/pre-push$/);
+});
+
+test('on Windows a pre-push.exe hook is started directly with the arguments Git gives it, and elsewhere it is ignored', async t => {
+  const f = await fixture(t);
+  await install(f.options);
+  const hooks = path.join(f.git('rev-parse', '--path-format=absolute', '--git-common-dir'), 'hooks');
+  await executable(path.join(hooks, 'pre-push.exe'), 'a program');
+  const calls = [];
+  const spawnImpl = (command, args, options) => {
+    calls.push({ command, args, options });
+    const child = new EventEmitter();
+    child.stdin = { on() {}, end() {} };
+    setImmediate(() => child.emit('close', 9, null));
+    return child;
+  };
+  const args = ['origin', '/srv/git/repo.git'];
+  const added = { ...f.env, NoDefaultCurrentDirectoryInExePath: '1', SPHINX_ADDED_NO_CWD_SEARCH: '1' };
+  let gated = 0;
+  const run = platform => dispatchHook({ event: 'pre-push', args, input: 'refs/heads/main 1 refs/heads/main 2\n', cwd: f.repo, env: added, gate: async () => { gated++; return 0; }, spawnImpl, platform });
+  // When <name> is missing, Git for Windows runs <name>.exe, and with CreateProcess, so its arguments arrive unchanged.
+  // Through sh, MSYS2 would turn /srv/git/repo.git into a path inside Git's own folder.
+  assert.equal(await run('win32'), 9, 'the hook rejects the push');
+  assert.equal(gated, 0);
+  const [exe] = calls;
+  assert.equal(exe.command, path.join(hooks, 'pre-push.exe'));
+  assert.deepEqual(exe.args, args);
+  assert.equal('windowsVerbatimArguments' in exe.options, false);
+  assert.equal(exe.options.cwd, f.repo);
+  assert.deepEqual(exe.options.stdio, ['pipe', 'inherit', 'inherit']);
+  assert.equal(exe.options.env.SPHINX_HOOK_DEPTH, '1');
+  assert.equal('NoDefaultCurrentDirectoryInExePath' in exe.options.env, false, 'the hook searches for commands as under Git alone');
+  // Elsewhere Git never looks for an .exe hook.
+  assert.equal(await run('linux'), 0);
+  assert.equal(calls.length, 1);
+  assert.equal(gated, 1);
+  // A hook named exactly for the event comes first, as in Git.
+  await executable(path.join(hooks, 'pre-push'), '#!/bin/sh\nexit 0\n');
+  assert.equal(await run('win32'), 9);
+  assert.equal(calls[1].command, 'sh');
+});
+
+test('on Windows a rejecting pre-push.exe hook still stops the push', { skip: process.platform !== 'win32', timeout: 60000 }, async t => {
+  const f = await fixture(t);
+  await install(f.options);
+  // where.exe fails on a hook's arguments, as a rejecting hook would.
+  await copyFile(path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'where.exe'), path.join(f.repo, '.git', 'hooks', 'pre-push.exe'));
+  let gated = 0;
+  const status = await dispatchHook({ event: 'pre-push', args: ['origin', '/srv/git/repo.git'], input: 'refs/heads/main 1 refs/heads/main 2\n', cwd: f.repo, env: f.env, gate: async () => { gated++; return 0; } });
+  assert.notEqual(status, 0);
+  assert.equal(gated, 0);
+});
+
+test('an existing pre-push hook in a path with Hangul, an apostrophe, braces and spaces still chains', async t => {
+  const f = await fixture(t, { prefix: "sphinx 한글 O'Neil {a,b} " });
+  const output = path.join(f.base, 'stdin');
+  await executable(path.join(f.repo, '.git/hooks/pre-push'), '#!/bin/sh\nprintf "%s\\n" "$@" > "$SPHINX_TEST_OUTPUT"\ncat >> "$SPHINX_TEST_OUTPUT"\nexit 19\n');
+  await install(f.options);
+  // A UNC remote URL starts with two backslashes, which MSYS2 would halve if they were not escaped. localhost resolves at once,
+  // while MSYS2 spends seconds on every argument whose server name does not.
+  const args = ['origin', "\\\\localhost\\share\\x{a,b}\\it's.git"];
+  const input = 'refs/heads/main 123 refs/heads/main 456\n';
+  let calls = 0;
+  assert.equal(await dispatchHook({ event: 'pre-push', args, input, cwd: f.repo, env: withGitShell({ ...f.env, SPHINX_TEST_OUTPUT: output }), gate: async () => { calls++; return 0; } }), 19);
+  assert.equal(calls, 0);
+  assert.equal(await readFile(output, 'utf8'), `${args.join('\n')}\n${input}`);
+});
+
+test('a chained pre-push that exits without reading a large stdin still lets the gate run', async t => {
+  const f = await fixture(t);
+  await executable(path.join(f.repo, '.git/hooks/pre-push'), '#!/bin/sh\nexit 0\n');
+  await install(f.options);
+  // More than a pipe holds, so the write is still pending when the hook exits: EPIPE on POSIX, EOF on Windows.
+  const input = 'refs/heads/b 1 refs/heads/b 2\n'.repeat(4000);
+  assert.equal(await dispatchHook({ event: 'pre-push', args: ['origin', 'url'], input, cwd: f.repo, env: withGitShell(f.env), gate: async () => 23 }), 23);
+});
+
+test('the hook runner starts a hook by the interpreter name in its shebang and drops the options, as Git for Windows does', async t => {
+  const dir = await mkdtemp(path.join(tmpdir(), "sphinx run hook ' "));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const output = path.join(dir, 'output');
+  const args = ['origin', "D:\\x\\{a,b}\\it's.git", 'a b'];
+  const report = 'printf "%s\\n" "$@" > "$SPHINX_TEST_OUTPUT"\n';
+  const cases = [
+    // None of these interpreter directories exists. Git for Windows only looks at the name and finds it on PATH.
+    ['an interpreter path that exists nowhere', `#!/nowhere/bin/sh\n${report}`, 0],
+    ['options, which Git drops', `#!/nowhere/bin/sh -e\nfalse\n${report}`, 0],
+    ['a Windows path and a CRLF line end', `#!C:\\nowhere\\sh\r\n${report}`, 0],
+    ['env', `#!/usr/bin/env sh\n${report}`, 0],
+    ['node', "#!/nowhere/bin/node\nrequire('fs').writeFileSync(process.env.SPHINX_TEST_OUTPUT, process.argv.slice(2).join('\\n') + '\\n');\n", 0],
+    ['the exit status', '#!/nowhere/bin/sh\nexit 7\n', 7],
+    ['an interpreter that is not installed', '#!/nowhere/bin/no-such-interpreter\n', 127],
+  ];
+  const env = withGitShell(prependPath({ ...process.env, SPHINX_TEST_OUTPUT: output }, path.dirname(process.execPath)));
+  // As dispatchHook starts it: the script is the -c argument and the hook is $0. On Windows every argument is quoted for MSYS2.
+  const argv = hook => ['-c', `${RUN_HOOK}\nrun_hook "$0" "$@"`, hook, ...args];
+  for (const [name, content, status] of cases) {
+    const hook = path.join(dir, 'hook');
+    await executable(hook, content);
+    await rm(output, { force: true });
+    const run = process.platform === 'win32'
+      ? spawnSync('sh', argv(hook).map(msys2Quote), { env, cwd: dir, encoding: 'utf8', windowsVerbatimArguments: true })
+      : spawnSync('sh', argv(hook), { env, cwd: dir, encoding: 'utf8' });
+    assert.equal(run.status, status, `${name}: ${run.stderr}${run.error ?? ''}`);
+    const received = await readFile(output, 'utf8').catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
+    assert.equal(received, status === 0 ? `${args.join('\n')}\n` : null, name);
+  }
+});
+
+test('only native Windows hook scripts start an existing hook through the shebang runner, and every other script is unchanged', async t => {
+  const win = await fixture(t), other = await fixture(t);
+  await install({ ...win.options, platform: 'win32' });
+  await install({ ...other.options, platform: 'linux' });
+  const file = (f, event) => path.join(f.paths.home, 'hooks', 'global', event);
+  const [protocol, prepared, gated] = await Promise.all(['proc-receive', 'post-commit', 'pre-push'].map(event => readFile(file(win, event), 'utf8')));
+  assert.ok(protocol.includes(`\n${RUN_HOOK}\n`));
+  assert.ok(protocol.endsWith('\nif [ -x "$hook" ]; then\n  run_hook "$hook" "$@"\nfi\nexit 0\n'));
+  assert.ok(prepared.includes(`\n${RUN_HOOK}\n`));
+  assert.ok(prepared.includes('\nif [ -x "$hook" ]; then\n  (run_hook "$hook" "$@")\n  status=$?\nfi\n'));
+  assert.doesNotMatch(gated, /run_hook/, 'Gated events hand the original hook to Sphinx, which starts it itself');
+  for (const event of ['proc-receive', 'post-commit']) execFileSync('sh', ['-n', file(win, event)], { env: withGitShell(win.env) }); // valid shell
+
+  const [posixProtocol, posixPrepared] = await Promise.all(['proc-receive', 'post-commit'].map(event => readFile(file(other, event), 'utf8')));
+  assert.ok(posixProtocol.endsWith('\nif [ -x "$hook" ]; then\n  exec "$hook" "$@"\nfi\nexit 0\n'));
+  assert.ok(posixPrepared.includes('\nif [ -x "$hook" ]; then\n  "$hook" "$@"\n  status=$?\nfi\n'));
+  for (const text of [posixProtocol, posixPrepared]) assert.doesNotMatch(text, /run_hook|cntrl/);
+});
+
+test('on Windows a prepared hook still streams stdin, returns the original status, and schedules preparation afterwards', { skip: process.platform !== 'win32', timeout: 30000 }, async t => {
+  const f = await fixture(t);
+  const scheduled = path.join(f.base, 'scheduled');
+  // The shared fixture CLI imports install.js by a plain path, which Node on Windows rejects. This one only records its arguments.
+  await writeFile(f.cliPath, "import { writeFile } from 'node:fs/promises';\nawait writeFile(process.env.SPHINX_TEST_SCHEDULED, JSON.stringify(process.argv.slice(2)));\n");
+  await executable(path.join(f.repo, '.git/hooks/post-rewrite'), '#!/nowhere/bin/sh\nread first\nprintf "ack:%s\\n" "$first"\nread second\nprintf "done:%s:%s\\n" "$1" "$second"\nexit 13\n');
+  await install(f.options);
+  const script = path.join(f.git('config', '--global', '--get', 'core.hooksPath'), 'post-rewrite');
+  // Started from outside the repository, so the background preparation never keeps a directory of the test in use.
+  const child = spawn('sh', [script, 'amend'], { cwd: tmpdir(), env: withGitShell({ ...f.env, GIT_DIR: path.join(f.repo, '.git'), SPHINX_TEST_SCHEDULED: scheduled }), stdio: ['pipe', 'pipe', 'pipe'] });
+  t.after(() => child.kill());
+  let output = '';
+  const acknowledged = new Promise(resolve => child.stdout.on('data', chunk => { output += chunk; if (output.includes('ack:first\n')) resolve(); }));
+  const closed = new Promise(resolve => child.on('close', resolve));
+  child.stdin.write('first\n'); await acknowledged;
+  child.stdin.end('second\n');
+  assert.equal(await closed, 13);
+  assert.equal(output, 'ack:first\ndone:amend:second\n');
+  for (let i = 0; i < 100 && !await readFile(scheduled, 'utf8').catch(() => ''); i++) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.deepEqual(await json(scheduled), ['prepare']);
+});
+
+test('with Sphinx installed, hooks whose shebang names an interpreter by absolute path still run, for gated and ungated events', { skip: process.platform !== 'win32', timeout: 60000 }, async t => {
+  const f = await fixture(t);
+  const out = path.join(f.base, 'out');
+  await mkdir(out);
+  const marker = name => `require('fs').writeFileSync(process.env.SPHINX_TEST_OUTPUT + '/${name}', 'ran');\n`;
+  // The shared fixture imports install.js by a plain path, which Node on Windows only accepts as a file URL.
+  await writeFile(f.cliPath, `import { dispatchHook } from ${JSON.stringify(new URL('../src/install.js', import.meta.url).href)};\nlet input = ''; for await (const chunk of process.stdin) input += chunk;\nprocess.exitCode = await dispatchHook({ event: process.argv[4], args: process.argv.slice(5), input, gate: async () => 0 });\n`);
+  // Git alone runs all of these, although neither interpreter path exists in Git's own tree.
+  await executable(path.join(f.repo, '.git/hooks/pre-commit'), `#!/usr/local/bin/node\n${marker('pre-commit')}`);
+  await executable(path.join(f.repo, '.git/hooks/commit-msg'), '#!/nowhere/bin/sh -e\nfalse\nprintf ran > "$SPHINX_TEST_OUTPUT/commit-msg"\n');
+  await executable(path.join(f.repo, '.git/hooks/post-commit'), `#!/usr/bin/node\n${marker('post-commit')}`);
+  await install(f.options);
+  // SPHINX_EVALUATOR keeps post-commit from scheduling background preparation, which would outlive the test.
+  const env = prependPath({ ...f.env, SPHINX_TEST_OUTPUT: out, SPHINX_EVALUATOR: '1' }, path.dirname(process.execPath));
+  const commit = () => execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-q', '--allow-empty', '-m', 'base'], { cwd: f.repo, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  commit();
+  for (const name of ['pre-commit', 'commit-msg', 'post-commit']) assert.equal(await readFile(path.join(out, name), 'utf8'), 'ran', name);
+  // A failing hook still blocks the commit.
+  await executable(path.join(f.repo, '.git/hooks/commit-msg'), '#!/usr/bin/node\nprocess.exit(5);\n');
+  assert.throws(commit, error => error.status === 1);
+});
+
+test('an existing pre-push hook started through node by absolute path gets its arguments and stdin intact', { skip: process.platform !== 'win32', timeout: 60000 }, async t => {
+  const f = await fixture(t, { prefix: "sphinx 한글 O'Neil {a,b} " });
+  const output = path.join(f.base, 'received');
+  const body = "let input = '';\nprocess.stdin.on('data', chunk => { input += chunk; });\nprocess.stdin.on('end', () => {\n  require('fs').writeFileSync(process.env.SPHINX_TEST_OUTPUT, JSON.stringify({ args: process.argv.slice(2), input }));\n  process.exit(19);\n});\n";
+  await executable(path.join(f.repo, '.git/hooks/pre-push'), `#!/usr/local/bin/node\n${body}`);
+  await install(f.options);
+  const args = ['origin', "\\\\localhost\\share\\x{a,b}\\it's.git"];
+  const input = 'refs/heads/main 123 refs/heads/main 456\n'.repeat(3);
+  let calls = 0;
+  const env = withGitShell(prependPath({ ...f.env, SPHINX_TEST_OUTPUT: output }, path.dirname(process.execPath)));
+  assert.equal(await dispatchHook({ event: 'pre-push', args, input, cwd: f.repo, env, gate: async () => { calls++; return 0; } }), 19);
+  assert.equal(calls, 0);
+  assert.deepEqual(JSON.parse(await readFile(output, 'utf8')), { args, input });
 });
 
 test('fresh repositories initialize and clone after global installation while existing reference hooks still reject', async t => {
@@ -230,7 +512,7 @@ test('repository override is diagnosed and explicitly chained without replacing 
   assert.equal((await doctor(f.options)).checks.find(c => c.name === 'Current repository').ok, true);
   const reinstalled = await install(f.options);
   assert.equal(reinstalled.warnings.some(w => w.includes('overrides')), false, 'An existing Sphinx repository dispatcher already covers this override');
-  assert.equal(await dispatchHook({ event: 'pre-push', input: '', cwd: f.repo, env: f.env, gate: async () => 0 }), 12);
+  assert.equal(await dispatchHook({ event: 'pre-push', input: '', cwd: f.repo, env: withGitShell(f.env), gate: async () => 0 }), 12);
   await uninstall({ ...f.options, repo: true });
   assert.equal(f.git('config', '--local', '--get', 'core.hooksPath'), 'custom-hooks');
   assert.match(await readFile(path.join(f.repo, 'custom-hooks/pre-push'), 'utf8'), /exit 12/);
@@ -328,7 +610,7 @@ test('reinstalling an edited agent hook refuses to create a second Sphinx handle
 test('installer preserves user replacement symlinks and reports intentionally unselected agents as optional', async t => {
   const f = await fixture(t);
   await install(f.options);
-  const report = await doctor(f.options);
+  const report = await doctor({ ...f.options, platform: 'linux' });
   assert.equal(report.checks.every(check => check.ok), true);
   assert.match(report.checks.find(check => check.name === 'codex integration').detail, /Not selected/);
   const hookDir = f.git('config', '--global', '--get', 'core.hooksPath');
@@ -354,7 +636,7 @@ test('native questionnaire hooks register host MCP servers without changing unre
   await mkdir(f.paths.codexHome, { recursive: true });
   await writeFile(tomlFile, beforeToml);
   await writeFile(claudeFile, JSON.stringify(beforeClaude));
-  await install({ ...f.options, agents: 'codex,claude' });
+  await install({ ...f.options, agents: 'codex,claude', platform: 'linux' });
   for (const name of ['codex', 'claude']) {
     const file = path.join(f.paths[`${name}Home`], name === 'codex' ? 'hooks.json' : 'settings.json');
     const document = await json(file);
@@ -375,8 +657,8 @@ test('native questionnaire hooks register host MCP servers without changing unre
   const claude = await json(claudeFile);
   assert.deepEqual(claude.oauthAccount, beforeClaude.oauthAccount);
   assert.deepEqual(claude.mcpServers.sphinx, { type: 'stdio', command: process.execPath, args: [f.cliPath, 'mcp'], env: { SPHINX_HOME: f.paths.home }, timeout: 1800000 });
-  assert.equal((await doctor(f.options)).checks.every(check => check.ok), true);
-  await install({ ...f.options, agents: 'codex,claude' });
+  assert.equal((await doctor({ ...f.options, platform: 'linux' })).checks.every(check => check.ok), true);
+  await install({ ...f.options, agents: 'codex,claude', platform: 'linux' });
   assert.equal((await readFile(tomlFile, 'utf8')).split('[mcp_servers.sphinx]').length, 2);
   assert.equal((await json(path.join(f.paths.claudeHome, 'settings.json'))).hooks.PostToolUseFailure.length, 1);
   await uninstall(f.options);
@@ -587,4 +869,251 @@ test('hooks call the package manager shim on PATH so upgrades keep working; a ch
   assert.equal(pnpm.command, q(path.join(pnpmBin, 'sphinx')));
   const checkout = await sphinxLauncher(cli, { PATH: other }, node);
   assert.deepEqual(checkout, { env: '', command: `${q(node)} ${q(cli)}` });
+  // Git's sh would split a Windows PATH prefix at the drive colon, so Windows never uses a shim or a PATH prefix.
+  assert.deepEqual(await sphinxLauncher(cli, { PATH: npmBin }, node, 'win32'), { env: '', command: `${q(node)} ${q(cli)}` });
+});
+
+test('macOS hooks append the reviewer CLI directories after the GUI PATH', async t => {
+  const { sphinxLauncher } = await import('../src/install.js');
+  const f = await fixture(t);
+  const q = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+  const node = '/opt/node/bin/node', cli = path.join(f.base, 'sphinx.js');
+  const tools = path.join(f.base, "tools ' bin"), more = path.join(f.base, 'more tools');
+  for (const name of ['claude', 'gh']) await executable(path.join(tools, name), '#!/bin/sh\n');
+  await executable(path.join(more, 'codex'), '#!/bin/sh\n');
+  const on = (...directories) => ({ PATH: directories.join(path.delimiter) });
+  const direct = { env: '', command: `${q(node)} ${q(cli)}` };
+  const appended = (...directories) => ({ ...direct, env: `PATH="$PATH"${directories.map(directory => `:${q(directory)}`).join('')} ` });
+  // Each directory goes after $PATH once, in its PATH order, so the GUI client's own git and system tools stay first and a
+  // tool installed in two places resolves to the copy the user's shell would run.
+  const launcher = await sphinxLauncher(cli, on(tools), node, 'darwin');
+  assert.deepEqual(launcher, appended(tools));
+  assert.ok(launcher.env.endsWith(`tools '\\'' bin' `), 'A quote in a directory name is closed, escaped and reopened');
+  assert.deepEqual(await sphinxLauncher(cli, on(more, tools), node, 'darwin'), appended(more, tools));
+  const ghOnly = path.join(f.base, 'gh only'), claudeOnly = path.join(f.base, 'claude only');
+  await executable(path.join(ghOnly, 'gh'), '#!/bin/sh\n');
+  await executable(path.join(claudeOnly, 'claude'), '#!/bin/sh\n');
+  assert.deepEqual(await sphinxLauncher(cli, on(ghOnly, claudeOnly, ghOnly), node, 'darwin'), appended(ghOnly, claudeOnly));
+  assert.deepEqual(await sphinxLauncher(cli, on(path.join(f.base, 'none')), node, 'darwin'), direct, 'Without a reviewer CLI there is no PATH change');
+  // A relative PATH entry would resolve against whichever repository the hook runs in, so it is never recorded.
+  await executable(path.join(f.base, 'relative', 'claude'), '#!/bin/sh\n');
+  const here = process.cwd();
+  process.chdir(f.base);
+  try { assert.deepEqual(await sphinxLauncher(cli, on('relative', more), node, 'darwin'), appended(more)); } finally { process.chdir(here); }
+  // The same PATH on any other platform gives the output it always did.
+  for (const platform of ['linux', 'win32']) assert.deepEqual(await sphinxLauncher(cli, on(tools, more), node, platform), direct, platform);
+});
+
+// Windows files carry no execute bit, so no shim is recognised there.
+test('macOS hooks put the reviewer CLI directories after the GUI PATH behind a package manager shim', { skip: process.platform === 'win32' }, async t => {
+  const { sphinxLauncher } = await import('../src/install.js');
+  const f = await fixture(t);
+  const q = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+  const node = '/opt/node/bin/node', cli = path.join(f.base, 'store', 'sphinx-understand', 'bin', 'sphinx.js');
+  const npmBin = path.join(f.base, 'npm-bin'), tools = path.join(f.base, "tools ' bin");
+  await executable(cli, '#!/usr/bin/env node\n');
+  await mkdir(npmBin, { recursive: true }); await symlink(cli, path.join(npmBin, 'sphinx'));
+  await executable(path.join(tools, 'claude'), '#!/bin/sh\n');
+  const command = q(path.join(npmBin, 'sphinx')), on = { PATH: [npmBin, tools].join(path.delimiter) };
+  assert.deepEqual(await sphinxLauncher(cli, on, node, 'darwin'), { env: `PATH='/opt/node/bin':"$PATH":${q(tools)} `, command });
+  assert.deepEqual(await sphinxLauncher(cli, on, node, 'linux'), { env: `PATH='/opt/node/bin':"$PATH" `, command });
+});
+
+test('on Windows the Claude Code hook command spells a UNC path with forward slashes, which bash -c passes on intact', async () => {
+  const { agentHookCommand } = await import('../src/install.js');
+  const q = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+  // Claude Code runs the command with bash -c, and MSYS2 turns each pair of backslashes on that command line into one.
+  const windows = ({ home, execPath, cliPath }) => agentHookCommand({ name: 'claude', home, execPath, cliPath, launcher: { env: '', command: `${q(execPath)} ${q(cliPath)}` }, platform: 'win32' });
+  assert.equal(windows({ home: '\\\\server\\share\\sphinx home', execPath: '\\\\server\\share\\node\\node.exe', cliPath: "\\\\server\\share\\O'Neil\\bin\\sphinx.js" }),
+    "SPHINX_HOME='//server/share/sphinx home' '//server/share/node/node.exe' '//server/share/O'\\''Neil/bin/sphinx.js' hook agent claude");
+  // A drive path is spelled as before.
+  const drive = { home: 'C:\\Users\\x\\.config\\sphinx', execPath: 'C:\\Program Files\\nodejs\\node.exe', cliPath: 'D:\\tools\\sphinx\\bin\\sphinx.js' };
+  assert.equal(windows(drive), `SPHINX_HOME=${q(drive.home)} ${q(drive.execPath)} ${q(drive.cliPath)} hook agent claude`);
+  // Elsewhere the launcher's command is used as it always was, whatever the paths look like.
+  const launcher = { env: `PATH='/opt/node/bin':"$PATH" `, command: "'/usr/local/bin/sphinx'" };
+  assert.equal(agentHookCommand({ name: 'claude', home: '\\\\server\\x', execPath: '/opt/node/bin/node', cliPath: '/x/sphinx.js', launcher, platform: 'linux' }),
+    `SPHINX_HOME='\\\\server\\x' PATH='/opt/node/bin':"$PATH" '/usr/local/bin/sphinx' hook agent claude`);
+});
+
+test('an agent whose CLI is on PATH is still detected, and one that is not is left out', async t => {
+  const f = await fixture(t);
+  const bin = path.join(f.base, 'bin');
+  await executable(path.join(bin, 'codex'), '#!/bin/sh\n');
+  assert.deepEqual(await detectAgents({ env: { ...f.env, PATH: bin }, platform: 'linux' }), ['codex']);
+  assert.deepEqual(await detectAgents({ env: { ...f.env, PATH: path.join(f.base, 'empty') }, platform: 'linux' }), []);
+});
+
+test('native Windows installs Git hooks only, rejects unsupported agents before changing anything, and doctor passes', async t => {
+  const f = await fixture(t, { prefix: "sphinx 한글 ' " });
+  // Both agent homes exist, so only the platform keeps `auto` from selecting them.
+  await mkdir(f.paths.codexHome, { recursive: true }); await mkdir(f.paths.claudeHome, { recursive: true });
+  const q = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+  const result = await install({ ...f.options, agents: 'auto', platform: 'win32' });
+  assert.deepEqual(result.agents, []);
+  assert.ok(result.warnings.includes(WINDOWS_AGENT_HINT));
+  assert.equal(result.warnings.some(warning => warning.includes('No supported coding agent was detected')), false);
+  const hookDir = f.git('config', '--global', '--get', 'core.hooksPath');
+  assert.equal(hookDir, path.join(f.paths.home, 'hooks', 'global'));
+  const prePush = await readFile(path.join(hookDir, 'pre-push'), 'utf8');
+  assert.ok(prePush.includes(`exec ${q(process.execPath)} ${q(f.cliPath)} hook git 'pre-push' "$@"`));
+  assert.doesNotMatch(prePush, /PATH=/);
+  const report = await doctor({ env: f.env, cwd: f.repo, platform: 'win32' });
+  assert.deepEqual(report.checks.filter(check => !check.ok), []);
+  for (const name of ['codex', 'pi', 'cursor', 'opencode']) assert.equal(report.checks.find(check => check.name === `${name} integration`).detail, 'Not supported on native Windows yet.');
+  assert.equal(report.checks.find(check => check.name === 'claude integration').detail, 'Not selected. Optional: sphinx install --agents claude.');
+  assert.deepEqual(await detectAgents({ env: f.env, platform: 'win32' }), []);
+
+  const g = await fixture(t);
+  const claudeSettings = path.join(g.paths.claudeHome, 'settings.json');
+  await mkdir(g.paths.codexHome, { recursive: true }); await mkdir(g.paths.claudeHome, { recursive: true });
+  await writeFile(claudeSettings, '{broken');
+  await assert.rejects(install({ ...g.options, agents: 'codex', platform: 'win32' }), /codex is not supported on native Windows yet; use WSL\./);
+  // Claude Code is allowed, but one unsupported name rejects the whole list first, before its unreadable settings are opened.
+  await assert.rejects(install({ ...g.options, agents: 'claude,pi', platform: 'win32' }), /pi is not supported on native Windows yet; use WSL\./);
+  assert.throws(() => g.git('config', '--global', '--get', 'core.hooksPath'), error => error.status === 1);
+  assert.equal(await readFile(claudeSettings, 'utf8'), '{broken');
+  for (const file of [g.paths.install, path.join(g.paths.codexHome, 'hooks.json'), path.join(g.home, '.claude.json')]) await assert.rejects(readFile(file), { code: 'ENOENT' });
+
+  assert.equal(WINDOWS_AGENT_HINT, 'On Windows, Sphinx installs Git hooks only. Add the optional Claude Code integration with sphinx install --agents claude.');
+  for (const agents of ['auto', 'none', 'claude', ['claude']]) assert.doesNotThrow(() => checkAgentPlatform(agents, 'win32'));
+  assert.throws(() => checkAgentPlatform('claude,pi', 'win32'), /pi is not supported/);
+  assert.throws(() => checkAgentPlatform(['codex', 'cursor'], 'win32'), { message: 'Native Windows supports Git hooks and the optional Claude Code integration (--agents claude). codex, cursor are not supported on native Windows yet; use WSL.' });
+  assert.doesNotThrow(() => checkAgentPlatform('codex', 'linux'));
+});
+
+test('the Windows agent check names each unsupported agent once and leaves unknown names to the existing validation', async t => {
+  // Unknown names and empty entries are not "unsupported on Windows": prepareAgents reports them.
+  for (const agents of ['codx', 'claude,', ',', 'Codex', 'claude,codx', ['claude', 'codx']]) assert.doesNotThrow(() => checkAgentPlatform(agents, 'win32'), JSON.stringify(agents));
+  const message = names => `Native Windows supports Git hooks and the optional Claude Code integration (--agents claude). ${names} not supported on native Windows yet; use WSL.`;
+  assert.throws(() => checkAgentPlatform('codex,codex', 'win32'), { message: message('codex is') });
+  assert.throws(() => checkAgentPlatform('pi,codx,claude,codex,pi,,cursor', 'win32'), { message: message('pi, codex, cursor are') });
+  const f = await fixture(t);
+  for (const agents of ['codx', 'claude,']) await assert.rejects(install({ ...f.options, agents, platform: 'win32' }), /--agents must be auto, none, or a comma-separated list/);
+  assert.throws(() => f.git('config', '--global', '--get', 'core.hooksPath'), error => error.status === 1);
+});
+
+test('Windows reinstall and uninstall restore an earlier backslash core.hooksPath exactly', async t => {
+  const f = await fixture(t);
+  const earlier = 'C:\\old hooks\\dir';
+  f.git('config', '--global', 'core.hooksPath', earlier);
+  await install({ ...f.options, platform: 'win32' });
+  await install({ ...f.options, platform: 'win32' });
+  assert.equal(f.git('config', '--global', '--get', 'core.hooksPath'), path.join(f.paths.home, 'hooks', 'global'));
+  await uninstall(f.options);
+  assert.equal(f.git('config', '--global', '--get', 'core.hooksPath'), earlier);
+});
+
+test('Windows install with auto keeps refreshing an opted-in Claude Code integration and shows the hint only when none is installed', async t => {
+  const f = await fixture(t);
+  const q = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+  // The CLI path after an update that moves it, for example into a new versioned package folder.
+  const updated = path.join(f.base, "updated sphinx cli ' entry.mjs");
+  await writeFile(updated, '');
+  await install({ ...f.options, agents: 'claude', platform: 'win32' });
+  const result = await install({ ...f.options, cliPath: updated, agents: 'auto', platform: 'win32' });
+  assert.deepEqual(result.agents, ['claude']);
+  assert.deepEqual(result.warnings, []);
+  const settings = await json(path.join(f.paths.claudeHome, 'settings.json'));
+  assert.equal(settings.hooks.SessionStart.length, 1);
+  assert.equal(settings.hooks.SessionStart[0].hooks[0].command, `SPHINX_HOME=${q(f.paths.home)} ${q(process.execPath)} ${q(updated)} hook agent claude`);
+  assert.deepEqual((await json(path.join(f.home, '.claude.json'))).mcpServers.sphinx.args, [updated, 'mcp']);
+  assert.deepEqual((await doctor({ env: f.env, cwd: f.repo, platform: 'win32' })).checks.filter(check => !check.ok), []);
+  // Only an integration the user opted into is kept: once it is gone, auto selects nothing and the hint returns.
+  await uninstall(f.options);
+  const bare = await install({ ...f.options, agents: 'auto', platform: 'win32' });
+  assert.deepEqual(bare.agents, []);
+  assert.deepEqual(bare.warnings, [WINDOWS_AGENT_HINT]);
+});
+
+test('on Windows doctor reports a Node or Sphinx CLI file that the hooks start and that is gone, and the install that fixes it', async t => {
+  const dispatchers = ['pre-push', 'pre-commit', 'post-commit', 'post-merge', 'post-rewrite', 'post-checkout'].map(event => `${event} dispatcher`);
+  const failing = async f => (await doctor({ env: f.env, cwd: f.repo, platform: 'win32' })).checks.filter(check => !check.ok);
+  const gone = (f, command) => ({ ok: false, detail: `Sphinx's hooks start ${f.cliPath}, which no longer exists. Run ${command}.` });
+  const f = await fixture(t);
+  await install({ ...f.options, agents: 'claude', platform: 'win32' });
+  assert.deepEqual(await failing(f), []);
+  // An update that moves the CLI, as every pnpm update does when it deletes the old version's folder.
+  await rm(f.cliPath);
+  assert.deepEqual(await failing(f), ['Global Git hooks', ...dispatchers, 'claude integration'].map(name => ({ name, ...gone(f, 'sphinx install') })));
+  // An entry written before this record existed is not checked.
+  const manifest = await json(f.paths.install);
+  delete manifest.installs.global.launch; delete manifest.agents.claude.launch;
+  await writeFile(f.paths.install, JSON.stringify(manifest));
+  assert.deepEqual(await failing(f), []);
+
+  // A repository's own install is repaired in that repository. The global install starts the same file and is repaired on its own.
+  const g = await fixture(t);
+  await install({ ...g.options, platform: 'win32' });
+  await install({ ...g.options, repo: true, platform: 'win32' });
+  await rm(g.cliPath);
+  assert.deepEqual(await failing(g), [{ name: 'Global Git hooks', ...gone(g, 'sphinx install') }, ...dispatchers.map(name => ({ name, ...gone(g, 'sphinx install --repo') }))]);
+
+  // Elsewhere nothing is recorded, and the hook scripts stay as they were.
+  for (const platform of ['linux', 'darwin']) {
+    const h = await fixture(t);
+    await install({ ...h.options, agents: 'claude', platform });
+    const posix = await json(h.paths.install);
+    assert.equal('launch' in posix.installs.global, false, platform);
+    assert.equal('launch' in posix.agents.claude, false, platform);
+    for (const event of ['pre-push', 'pre-commit']) assert.doesNotMatch(await readFile(path.join(h.paths.home, 'hooks', 'global', event), 'utf8'), /no longer exists/, platform);
+  }
+});
+
+test('on Windows doctor run outside a repository also fails the global hooks when the file they start is gone', async t => {
+  const f = await fixture(t);
+  await install({ ...f.options, platform: 'win32' });
+  // A folder that is no repository: Git may not look for one above it.
+  const elsewhere = path.join(f.base, 'elsewhere');
+  await mkdir(elsewhere);
+  const outside = async () => (await doctor({ env: { ...f.env, GIT_CEILING_DIRECTORIES: f.base }, cwd: elsewhere, platform: 'win32' })).checks;
+  const failing = checks => checks.filter(check => !check.ok);
+  const intact = await outside();
+  assert.match(intact.find(check => check.name === 'Current repository').detail, /^Not inside a Git repository/);
+  assert.deepEqual(failing(intact), []);
+  await rm(f.cliPath);
+  // There are no dispatcher rows outside a repository, so this row is the one that says so.
+  assert.deepEqual(failing(await outside()), [{ name: 'Global Git hooks', ok: false, detail: `Sphinx's hooks start ${f.cliPath}, which no longer exists. Run sphinx install.` }]);
+  // The install it names records the CLI's new path.
+  const updated = path.join(f.base, 'updated sphinx cli.mjs');
+  await writeFile(updated, '');
+  await install({ ...f.options, cliPath: updated, platform: 'win32' });
+  assert.deepEqual(failing(await outside()), []);
+});
+
+test('on Windows a gated dispatcher whose Sphinx CLI is gone says what to run and blocks, instead of a stack trace', { skip: process.platform !== 'win32', timeout: 60000 }, async t => {
+  const f = await fixture(t);
+  await install(f.options);
+  const hookDir = f.git('config', '--global', '--get', 'core.hooksPath');
+  await rm(f.cliPath);
+  for (const event of ['pre-push', 'pre-commit']) {
+    const run = spawnSync('sh', [path.join(hookDir, event), 'origin', 'url'], { cwd: f.repo, env: withGitShell(f.env), encoding: 'utf8', input: '' });
+    assert.equal(run.status, 1, event);
+    assert.equal(run.stderr, `Sphinx's hooks start ${f.cliPath}, which no longer exists. Run sphinx install.\n`, event);
+  }
+});
+
+test('on native Windows the Claude Code post-tool hooks also match PowerShell tool calls, and uninstall restores the settings exactly', async t => {
+  // Claude Code on Windows runs git through its PowerShell tool as well as its Bash tool. Every other platform and Codex keep `Bash`.
+  const handler = { type: 'command', command: 'sphinx hook agent claude', timeout: 10 };
+  const matchers = (name, platform) => nativeHookSpecs(name, handler, platform).filter(spec => spec.event.startsWith('PostToolUse')).map(spec => `${spec.event} ${spec.group.matcher}`);
+  assert.deepEqual(matchers('claude', 'win32'), ['PostToolUse Bash|PowerShell', 'PostToolUseFailure Bash|PowerShell']);
+  for (const platform of ['linux', 'darwin']) assert.deepEqual(matchers('claude', platform), ['PostToolUse Bash', 'PostToolUseFailure Bash'], platform);
+  assert.deepEqual(matchers('codex', 'win32'), ['PostToolUse Bash']);
+
+  const f = await fixture(t);
+  const settingsFile = path.join(f.paths.claudeHome, 'settings.json');
+  const before = { model: 'my-model', hooks: { PostToolUse: [{ matcher: 'Write', hooks: [{ type: 'command', command: 'my-write-hook' }] }] } };
+  await mkdir(f.paths.claudeHome, { recursive: true });
+  await writeFile(settingsFile, `${JSON.stringify(before, null, 2)}\n`);
+  await install({ ...f.options, agents: 'claude', platform: 'win32' });
+  const installed = await readFile(settingsFile, 'utf8'), settings = JSON.parse(installed);
+  for (const event of ['PostToolUse', 'PostToolUseFailure']) {
+    const ours = settings.hooks[event].filter(group => group.hooks.some(hook => hook.statusMessage === 'Sphinx understanding check'));
+    assert.deepEqual(ours.map(group => group.matcher), ['Bash|PowerShell'], event);
+  }
+  assert.deepEqual(settings.hooks.PostToolUse[0], before.hooks.PostToolUse[0], 'The existing Write hook stays as it was');
+  await install({ ...f.options, agents: 'claude', platform: 'win32' });
+  assert.equal(await readFile(settingsFile, 'utf8'), installed, 'Installing again changes nothing');
+  await uninstall(f.options);
+  assert.deepEqual(await json(settingsFile), before);
 });

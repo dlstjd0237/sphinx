@@ -1,6 +1,15 @@
 const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 export const stripAnsi = value => String(value).replace(ANSI, '');
 
+const dropFailedWrite = () => {};
+/** One line to stderr. A Git client that cancelled can close a hook's stderr while the hook still has to free the
+ * questionnaire for a retry and hold the pass. Node raises every failed write as an 'error' event, which ends the process
+ * when nothing listens (console.error covers only the first), so this keeps one listener that drops them. */
+export function stderrLine(line) {
+  if (!process.stderr.listeners('error').includes(dropFailedWrite)) process.stderr.on('error', dropFailedWrite);
+  process.stderr.write(`${line}\n`);
+}
+
 export function colorEnabled({ stream = process.stdout, env = process.env } = {}) {
   if (Object.hasOwn(env, 'NO_COLOR')) return false;
   if (Object.hasOwn(env, 'FORCE_COLOR')) return env.FORCE_COLOR !== '0' && env.FORCE_COLOR !== '';

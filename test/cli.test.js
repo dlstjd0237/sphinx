@@ -7,8 +7,15 @@ import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
+import { activationAdvice, agentSummary, guidedInstallError, interfaceSummary } from '../src/cli.js';
+import { getPaths } from '../src/config.js';
 
 const CLI = fileURLToPath(new URL('../bin/sphinx.js', import.meta.url));
+const WINDOWS_NOTE = 'Sphinx does not open clients on Windows. Start a new Claude Code session in this repository to load Sphinx.';
+const AUTO_SUMMARY = 'Questions appear in the browser on a local Mac or Windows, otherwise in the terminal.';
+// Native Windows has no inline terminal check, so even `auto` over SSH shows no questions in the terminal.
+const WINDOWS_AUTO_SUMMARY = 'Questions appear in the browser: native Windows has no inline terminal check. The page opens by itself, and over SSH Git prints its address instead.';
+const squash = text => text.replace(/\s+/g, ' ');
 
 // A subprocess fixture exercising the real provider transport and output validation.
 // It never calls a model or connects to a service.
@@ -341,10 +348,28 @@ test('each public CLI command provides contextual help without setup or model ca
   assert.deepEqual(await f.calls(), []);
 });
 
+test('help says the questionnaire opens by itself on macOS and Windows, and that Windows opens no clients', { timeout: 30000 }, async t => {
+  const f = await fixture(t);
+  // The JSON form is the help text as written, so terminal wrapping cannot split a sentence.
+  const flat = value => Array.isArray(value) ? value.map(flat).join('\n') : value && typeof value === 'object' ? flat(Object.values(value)) : String(value ?? '');
+  const help = command => flat(JSON.parse(f.cli(command, '--help', '--json')));
+  const install = help('install');
+  assert.ok(install.includes('On macOS and Windows it opens in your default browser by itself: in front on Windows and for GUI Git clients on macOS, in the background for macOS terminals and coding agents. Other environments print its local URL.'), install);
+  // Guided installation, --launch and --no-launch each say they open clients, so each carries the Windows exception.
+  assert.equal(install.split(WINDOWS_NOTE).length - 1, 3, install);
+  assert.ok(install.includes('On Windows, only claude is supported; auto connects no new agent but keeps Claude Code if it is already connected.'));
+  for (const command of ['activate', 'mcp']) assert.ok(help(command).includes(WINDOWS_NOTE), `${command} help should carry the Windows exception`);
+  assert.ok(help('config').includes('auto (default): the browser on a local Mac or on Windows, otherwise inline in the terminal you ran Git from.'));
+  assert.ok(squash(f.cli('--help')).includes(`Open fresh coding-agent sessions with Sphinx. ${WINDOWS_NOTE}`));
+  assert.ok(squash(f.cli('config', '--interface', 'auto')).includes(process.platform === 'win32' ? WINDOWS_AUTO_SUMMARY : AUTO_SUMMARY));
+});
+
 test('scripted installation defers client launch and activate checks configured selections', async t => {
   const f = await fixture(t);
   const output = f.cli('install', '--yes', '--provider', 'claude', '--agents', 'claude');
-  assert.match(output, /sphinx activate --agents claude/);
+  // Native Windows never opens clients: it says to start a Claude Code session instead of offering a command.
+  if (process.platform === 'win32') { assert.ok(squash(output).includes(WINDOWS_NOTE)); assert.doesNotMatch(output, /sphinx activate/); }
+  else assert.match(output, /sphinx activate --agents claude/);
   assert.doesNotMatch(output, /Restart Claude Code|Codex hook trust/);
   await assert.rejects(stat(path.join(f.env.SPHINX_HOME, 'activations')), { code: 'ENOENT' });
   const manifest = await readFile(path.join(f.env.SPHINX_HOME, 'install.json'), 'utf8');
@@ -362,7 +387,8 @@ test('explicit activation in headless environments reports fallback without chan
   const env = { ...f.env, CI: '1', FORCE_COLOR: '1' };
   const installed = f.run(process.execPath, [CLI, 'install', '--yes', '--launch', '--provider', 'claude', '--agents', 'claude'], { env });
   assert.equal(installed.status, 0, installed.stderr);
-  assert.match(installed.stdout, /No local desktop/);
+  const fallback = process.platform === 'win32' ? WINDOWS_NOTE : 'No local desktop';
+  assert.ok(squash(installed.stdout).includes(fallback));
   const manifest = await readFile(path.join(f.env.SPHINX_HOME, 'install.json'), 'utf8');
   const activated = f.run(process.execPath, [CLI, 'activate', '--json'], { env });
   assert.equal(activated.status, 1);
@@ -370,10 +396,71 @@ test('explicit activation in headless environments reports fallback without chan
   const { results } = JSON.parse(activated.stdout);
   assert.deepEqual(results.map(item => item.agent), ['claude']);
   assert.equal(results[0].status, 'unavailable');
-  assert.match(results[0].detail, /No local desktop/);
+  assert.ok(results[0].detail.includes(fallback));
   assert.equal(await readFile(path.join(f.env.SPHINX_HOME, 'install.json'), 'utf8'), manifest);
   await assert.rejects(stat(path.join(f.env.SPHINX_HOME, 'activations')), { code: 'ENOENT' });
   assert.deepEqual(await f.calls(), []);
+});
+
+test('the guided-install error points Git Bash users at a real terminal, only on Windows', () => {
+  const guided = 'Run sphinx install in a terminal for guided setup, or use --yes with your chosen options. See sphinx install --help.';
+  assert.equal(guidedInstallError('linux', { MSYSTEM: 'MINGW64' }), guided);
+  assert.equal(guidedInstallError('win32', {}), guided);
+  assert.equal(guidedInstallError('win32', { MSYSTEM: 'MINGW64' }), `${guided} Git Bash's MinTTY window does not give Node a terminal; run sphinx install from Windows Terminal or PowerShell, or use --yes.`);
+});
+
+test('the agent summary row and the activation advice say what native Windows does', () => {
+  const windows = 'auto (Git hooks; keeps Claude Code if already connected)';
+  assert.equal(agentSummary(undefined, 'win32'), windows);
+  assert.equal(agentSummary('auto', 'win32'), windows);
+  assert.equal(agentSummary(undefined, 'linux'), 'auto (detect installed agents)');
+  for (const platform of ['win32', 'linux']) for (const agents of ['claude', 'none', 'claude,pi']) assert.equal(agentSummary(agents, platform), agents);
+  assert.deepEqual(activationAdvice(['claude'], 'win32'), { note: WINDOWS_NOTE });
+  assert.deepEqual(activationAdvice(['claude'], 'linux'), { command: 'sphinx activate --agents claude' });
+  assert.deepEqual(activationAdvice(['codex', 'claude'], 'darwin'), { command: 'sphinx activate --agents codex,claude' });
+});
+
+test('the interface setting says where questions appear, and on native Windows terminal and auto mean the browser', () => {
+  for (const platform of ['linux', 'darwin']) assert.equal(interfaceSummary('terminal', platform), 'Questions appear in the terminal (the browser is the fallback).', platform);
+  // Windows has no inline terminal check and no terminal window, so the check falls back to the browser.
+  assert.equal(interfaceSummary('terminal', 'win32'), 'Questions appear in the browser: native Windows has no inline terminal check.');
+  for (const platform of ['win32', 'linux']) assert.equal(interfaceSummary('browser', platform), 'Questions appear in the browser.', platform);
+  // `auto` says "otherwise in the terminal" elsewhere, which is not true of native Windows over SSH: Git prints the page's address.
+  for (const platform of ['linux', 'darwin']) assert.equal(interfaceSummary('auto', platform), AUTO_SUMMARY, platform);
+  assert.equal(interfaceSummary('auto', 'win32'), WINDOWS_AUTO_SUMMARY);
+});
+
+test('on Windows an unsupported agent is rejected before any OpenRouter key is saved', { skip: process.platform !== 'win32' }, async t => {
+  const f = await fixture(t);
+  // No key is set: without the early check this stops on the missing key instead, and guided setup would ask for one first.
+  const result = f.run(process.execPath, [CLI, 'install', '--yes', '--preset', 'openrouter-value', '--allow-paid', '--agents', 'codex']);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /codex is not supported on native Windows yet/);
+  await assert.rejects(stat(getPaths(f.env).credentials), { code: 'ENOENT' });
+  await assert.rejects(stat(getPaths(f.env).install), { code: 'ENOENT' });
+});
+
+test('on Windows, guided setup offers only Claude Code and preselects it once it is connected', { skip: process.platform !== 'win32' }, async t => {
+  const f = await fixture(t);
+  // The preload makes the piped stdin look like a terminal. With every other choice given, one Enter answers the only question.
+  const looksLikeTerminal = "data:text/javascript,Object.defineProperty(process.stdin,'isTTY',{value:true})";
+  const guided = (...launch) => f.run(process.execPath, ['--import', looksLikeTerminal, CLI, 'install', ...launch, '--preset', 'claude-economy', '--events', 'pre-push', '--branches', 'main', '--remotes', '*', '--level', 'standard', '--distance', 'high'], { input: '\n' });
+  const fresh = guided();
+  assert.equal(fresh.status, 0, fresh.stderr);
+  assert.match(fresh.stdout, /2\. \[ \] Claude Code/);
+  assert.doesNotMatch(fresh.stdout, /\[.\] (?:Codex|Pi|Cursor|OpenCode)/);
+  assert.match(fresh.stdout, /Agent integrations +none/);
+  assert.doesNotMatch(fresh.stdout, /opens selected installed clients/); // Nothing is chosen, so nothing to promise either.
+  f.cli('install', '--yes', '--agents', 'claude');
+  const connected = guided('--no-launch');
+  assert.equal(connected.status, 0, connected.stderr);
+  assert.match(connected.stdout, /2\. \[x\] Claude Code/);
+  assert.match(connected.stdout, /Agent integrations +claude/);
+  // The default path (no --no-launch) is the one that opens clients elsewhere. Sphinx opens none on Windows, so it neither promises to nor reports a failed attempt, and the note appears once.
+  const launched = guided();
+  assert.equal(launched.status, 0, launched.stderr);
+  assert.doesNotMatch(launched.stdout, /opens selected installed clients|Not opened/);
+  assert.equal(squash(launched.stdout).split(WINDOWS_NOTE).length - 1, 1);
 });
 
 test('contradictory launch flags and repository-only launches fail before installation', async t => {

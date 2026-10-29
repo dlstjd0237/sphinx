@@ -8,6 +8,7 @@ import { delimiter, join, resolve } from 'node:path';
 import { questionLimit } from './routing.js';
 import { runReviewer, reviewedData } from './reviewer.js';
 import { hasPreferences } from './repo-context.js';
+import { envValue } from './windows.js';
 
 const MAX_OUTPUT_BYTES = 256 * 1024;
 const MAX_CONTEXT_BYTES = 1024 * 1024;
@@ -287,9 +288,9 @@ async function planSignInProblem(provider, { runner, cwd, env, signal }) {
 }
 
 /** Coding-agent CLIs installed on PATH that can take over a check on the user's plan. */
-export async function planProviders(env = process.env) {
+export async function planProviders(env = process.env, platform = process.platform) {
   const found = [];
-  for (const name of ['claude', 'codex']) if (await findExecutable(name, env)) found.push(name);
+  for (const name of ['claude', 'codex']) if (await findExecutable(name, env, platform)) found.push(name);
   return found;
 }
 
@@ -331,13 +332,20 @@ const codexError = stdout => {
   return null;
 };
 
-async function findExecutable(command, env) {
-  for (const directory of (env.PATH ?? '').split(delimiter).filter(Boolean)) {
-    const candidate = resolve(directory, command);
-    try {
-      await access(candidate, constants.X_OK);
-      if ((await stat(candidate)).isFile()) return candidate;
-    } catch { /* Continue searching PATH. */ }
+// Without a shell, spawn() on Windows starts only `<name>.com` and `<name>.exe` (tried in that order). The extensionless sh
+// shim and the `.cmd` shim that npm installs need a shell, so they do not count as installed there.
+export async function findExecutable(command, env, platform = process.platform) {
+  const names = platform === 'win32' ? [`${command}.com`, `${command}.exe`] : [command];
+  // spawn() on Windows (libuv's search_path) drops one quote, " or ', from each end of a PATH entry.
+  const unquote = platform === 'win32' ? entry => entry.replace(/^["']/, '').replace(/["']$/, '') : entry => entry;
+  for (const directory of (envValue(env, 'PATH', platform) ?? '').split(delimiter).map(unquote).filter(Boolean)) {
+    for (const name of names) {
+      const candidate = resolve(directory, name);
+      try {
+        await access(candidate, constants.X_OK);
+        if ((await stat(candidate)).isFile()) return candidate;
+      } catch { /* Continue searching PATH. */ }
+    }
   }
   return null;
 }
@@ -348,15 +356,25 @@ async function providerFor(config, env) {
   if (provider !== 'auto') fail(`Unsupported evaluator provider: ${provider}.`, 'INVALID_CONFIG');
   const candidates = env.CLAUDECODE ? ['claude', 'codex'] : ['codex', 'claude'];
   for (const candidate of candidates) if (await findExecutable(candidate, env)) return candidate;
-  fail('No supported evaluator CLI found. Install and sign in to Codex or Claude Code, or configure provider=openrouter.', 'PROVIDER_NOT_FOUND');
+  fail(`No supported evaluator CLI found. Install and sign in to Codex or Claude Code, or configure provider=openrouter.${process.platform === 'win32' ? ' On Windows, Sphinx needs claude.exe or codex.exe from the native installers; npm-only installs are not supported yet.' : ''}`, 'PROVIDER_NOT_FOUND');
+}
+
+// One error for every way a CLI can fail to start: spawn() throws some failures at once (ENAMETOOLONG) and reports others (ENOENT) as an 'error' event.
+function startFailure(command, error, platform) {
+  let message = `Could not start ${command}. Check that the CLI is installed and available on PATH.`;
+  if (error?.code === 'ENAMETOOLONG') message = `This request is too long to pass to ${command} on this system. Switch this check to another reviewer.`;
+  else if (platform === 'win32' && error?.code === 'ENOENT') message = `Could not start ${command}. On Windows Sphinx runs ${command}.exe directly; a CLI installed only through npm (${command}.cmd) is not supported yet. Use the native installer, or switch this check to another reviewer.`;
+  return new EvaluatorError(message, 'PROVIDER_START_FAILED', { cause: error });
 }
 
 /** Dependency-free subprocess runner. Never invokes a shell; caps both output streams. */
-export function runProcess({ command, args, cwd, env, input, timeoutMs, maxOutputBytes = MAX_OUTPUT_BYTES, signal }) {
+export function runProcess({ command, args, cwd, env, input, timeoutMs, maxOutputBytes = MAX_OUTPUT_BYTES, signal, spawnImpl = spawn, platform = process.platform }) {
   signal?.throwIfAborted();
   return new Promise((resolveResult, reject) => {
     const grouped = process.platform !== 'win32';
-    const child = spawn(command, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: grouped, windowsHide: true });
+    let child;
+    try { child = spawnImpl(command, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: grouped, windowsHide: true }); }
+    catch (error) { throw startFailure(command, error, platform); }
     const output = { stdout: [], stderr: [] };
     let bytes = 0;
     let failure;
@@ -389,14 +407,15 @@ export function runProcess({ command, args, cwd, env, input, timeoutMs, maxOutpu
       if (bytes > maxOutputBytes) stop(new EvaluatorError('The evaluator exceeded its output limit. Retry with a smaller change.', 'OUTPUT_LIMIT'));
       else output[stream].push(chunk);
     });
-    child.on('error', error => finish(new EvaluatorError(`Could not start ${command}. Check that the CLI is installed and available on PATH.`, 'PROVIDER_START_FAILED', { cause: error })));
+    child.on('error', error => finish(startFailure(command, error, platform)));
     child.on('close', (exitCode, signal) => {
       if (finished) return;
       finish(failure);
       if (!failure) resolveResult({ exitCode, signal, stdout: Buffer.concat(output.stdout).toString('utf8'), stderr: Buffer.concat(output.stderr).toString('utf8') });
     });
+    // A CLI that exits without reading its input breaks the pipe (Windows reports EOF instead of EPIPE); 'close' then reports why.
     child.stdin.on('error', error => {
-      if (error.code !== 'EPIPE') stop(new EvaluatorError('Could not send the snapshot to the evaluator. Retry the assessment.', 'PROVIDER_INPUT_FAILED', { cause: error }));
+      if (!['EPIPE', 'EOF'].includes(error.code)) stop(new EvaluatorError('Could not send the snapshot to the evaluator. Retry the assessment.', 'PROVIDER_INPUT_FAILED', { cause: error }));
     });
     child.stdin.end(input);
   });

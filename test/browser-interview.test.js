@@ -7,7 +7,8 @@ import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createBrowserInterview, notifyDesktop, openQuestionnaireBrowser } from '../src/browser-interview.js';
+import { createBrowserInterview, notifyDesktop, openQuestionnaireBrowser, unattendedGit } from '../src/browser-interview.js';
+import { SESSION_ENV } from '../src/activation.js';
 import { createSessionStore } from '../src/sessions.js';
 import { DEFAULT_CONFIG } from '../src/config.js';
 import { claimCheckpointDialog, checkpointTerminalStatus, finishCheckpointDialog } from '../src/terminal-launch.js';
@@ -27,7 +28,7 @@ async function fixture(t, { generate, grade, maxModelCalls = 20, validate = asyn
   });
   await store.ensure(snapshot, config);
   const controller = new AbortController(), output = [];
-  const interview = createBrowserInterview({ notify: () => false, env, signal: controller.signal, store, readConfig: async () => config, revalidate: async () => { await validate(); return true; }, openBrowser: async () => { opened++; return true; }, output: text => output.push(text), findPlans: async () => plans, checkUpdate: async () => null, ...interviewOptions });
+  const interview = createBrowserInterview({ notify: () => false, env, signal: controller.signal, store, readConfig: async () => config, revalidate: async () => { await validate(); return true; }, openBrowser: async () => { opened++; return 'background'; }, output: text => output.push(text), findPlans: async () => plans, checkUpdate: async () => null, ...interviewOptions });
   const request = { id: snapshot.id, token: randomUUID(), repoRoot, delivery: 'hook', createdAt: Date.now() };
   const tasks = [];
   const present = (next = request) => { const task = interview.present({ request: next }); tasks.push(task); return task; };
@@ -53,9 +54,179 @@ test('browser launch uses only macOS background open and never activates or mini
   const result = await openQuestionnaireBrowser('http://127.0.0.1:12345/token', { platform: 'darwin', env: {}, spawnImpl: (command, args, options) => {
     invocation = { command, args, options }; const child = new EventEmitter(); setImmediate(() => child.emit('exit', 0)); return child;
   } });
-  assert.equal(result, true); assert.equal(invocation.command, '/usr/bin/open'); assert.deepEqual(invocation.args, ['-g', 'http://127.0.0.1:12345/token']);
+  assert.equal(result, 'background'); assert.equal(invocation.command, '/usr/bin/open'); assert.deepEqual(invocation.args, ['-g', 'http://127.0.0.1:12345/token']);
   assert.doesNotMatch(JSON.stringify(invocation), /activate|minimiz|frontmost|osascript/);
-  for (const options of [{ platform: 'linux', env: { DISPLAY: ':1' } }, { platform: 'darwin', env: { SSH_TTY: '/dev/tty' } }, { platform: 'darwin', env: { CI: '1' } }]) assert.equal(await openQuestionnaireBrowser('http://127.0.0.1:12345/token', { ...options, spawnImpl: () => assert.fail('must not invoke a foreground launcher') }), false);
+  // The opener swallows a launcher that throws, so count the launches instead of failing inside the stub.
+  let launched = 0;
+  for (const options of [{ platform: 'linux', env: { DISPLAY: ':1' } }, { platform: 'linux', env: { DISPLAY: ':1' }, front: true }, { platform: 'darwin', env: { SSH_TTY: '/dev/tty' } }, { platform: 'darwin', env: { CI: '1' } }]) assert.equal(await openQuestionnaireBrowser('http://127.0.0.1:12345/token', { ...options, spawnImpl: () => { launched++; throw new Error('must not invoke a foreground launcher'); } }), false);
+  assert.equal(launched, 0, 'must not invoke a foreground launcher');
+});
+
+test('on Windows the page opens in front through rundll32, with no shell, no hide flag, and no Git or Sphinx variables', { timeout: 5000 }, async () => {
+  const url = 'http://127.0.0.1:12345/token', child = new EventEmitter();
+  let invocation, killed = false, unrefs = 0;
+  child.kill = () => { killed = true; }; child.unref = () => { unrefs++; };
+  // The stub only ever spawns. rundll32's exit code is always 0 and says nothing, so the answer cannot wait for the exit.
+  const result = await openQuestionnaireBrowser(url, { platform: 'win32', env: { SYSTEMROOT: 'D:\\Win', GIT_DIR: 'x', git_index_file: 'i', SPHINX_HOME: 'y', KEEP: 'z' }, spawnImpl: (command, args, options) => {
+    invocation = { command, args, options }; setImmediate(() => child.emit('spawn')); return child;
+  } });
+  assert.equal(result, 'foreground');
+  assert.equal(invocation.command, 'D:\\Win\\System32\\rundll32.exe'); assert.deepEqual(invocation.args, ['url.dll,FileProtocolHandler', url]);
+  assert.equal(invocation.options.cwd, 'D:\\Win\\System32', 'a browser this starts must not hold the repository folder');
+  assert.equal(invocation.options.env.KEEP, 'z'); assert.deepEqual(Object.keys(invocation.options.env).filter(key => /^(GIT_|SPHINX_)/i.test(key)), []);
+  assert.equal(invocation.options.stdio, 'ignore'); assert.equal(Object.hasOwn(invocation.options, 'windowsHide'), false, 'rundll32 is a GUI program'); assert.equal(invocation.options.shell, undefined);
+  assert.equal(killed, false); assert.equal(unrefs, 1, 'a rundll32 stuck on a dialog of its own must not keep the hook running after Sphinx has stopped');
+  assert.doesNotThrow(() => { child.emit('error', new Error('late')); child.emit('exit', 0); }, 'a late error or the exit must not crash the hook');
+  assert.equal(killed, false, 'rundll32 is never killed');
+});
+
+test('on Windows rundll32 does not inherit the command-search block Sphinx set for itself, and keeps one the user set', { timeout: 5000 }, async () => {
+  const url = 'http://127.0.0.1:12345/token', envs = [];
+  const spawnImpl = (_command, _args, options) => { envs.push(options.env); const child = new EventEmitter(); setImmediate(() => child.emit('spawn')); return child; };
+  await openQuestionnaireBrowser(url, { platform: 'win32', env: { NoDefaultCurrentDirectoryInExePath: '1', SPHINX_ADDED_NO_CWD_SEARCH: '1', KEEP: 'z' }, spawnImpl });
+  await openQuestionnaireBrowser(url, { platform: 'win32', env: { NoDefaultCurrentDirectoryInExePath: '1', KEEP: 'z' }, spawnImpl });
+  assert.deepEqual(envs, [{ KEEP: 'z' }, { NoDefaultCurrentDirectoryInExePath: '1', KEEP: 'z' }]);
+});
+
+test('on Windows the program folder comes from SystemRoot in any letter case, else from this process, else C:\\Windows', { timeout: 5000 }, async () => {
+  const url = 'http://127.0.0.1:12345/token', launched = [];
+  const spawnImpl = (command, _args, options) => { launched.push([command, options.cwd]); const child = new EventEmitter(); setImmediate(() => child.emit('spawn')); return child; };
+  for (const key of ['SystemRoot', 'SYSTEMROOT', 'systemroot']) await openQuestionnaireBrowser(url, { platform: 'win32', env: { [key]: 'E:\\W' }, spawnImpl });
+  assert.deepEqual(launched, Array(3).fill(['E:\\W\\System32\\rundll32.exe', 'E:\\W\\System32']));
+  launched.length = 0;
+  await openQuestionnaireBrowser(url, { platform: 'win32', env: {}, spawnImpl });
+  const [[command, cwd]] = launched;
+  assert.equal(command, path.win32.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'rundll32.exe')); assert.equal(cwd, path.win32.dirname(command));
+});
+
+test('on Windows a launch that fails or is not allowed reports the page as not opened, and only the local page may be opened', { timeout: 5000 }, async () => {
+  const url = 'http://127.0.0.1:12345/token';
+  const failing = new EventEmitter();
+  assert.equal(await openQuestionnaireBrowser(url, { platform: 'win32', env: {}, spawnImpl: () => { setImmediate(() => failing.emit('error', Object.assign(new Error('spawn rundll32.exe ENOENT'), { code: 'ENOENT' }))); return failing; } }), false);
+  assert.equal(await openQuestionnaireBrowser(url, { platform: 'win32', env: {}, spawnImpl: () => { throw new Error('spawn EACCES'); } }), false);
+  let started = 0;
+  const spawnImpl = () => { started++; throw new Error('must not start a program'); };
+  for (const env of [{ CI: '1' }, { SPHINX_EVALUATOR: '1' }, { SSH_CONNECTION: 'remote' }, { SSH_TTY: '/dev/pts/1' }]) assert.equal(await openQuestionnaireBrowser(url, { platform: 'win32', env, spawnImpl }), false);
+  for (const other of ['http://example.com:80/x', 'http://localhost:12345/x', 'http://127.0.0.1/x', 'https://127.0.0.1:12345/x']) await assert.rejects(openQuestionnaireBrowser(other, { platform: 'win32', env: {}, spawnImpl }), { message: 'Invalid local questionnaire URL.' });
+  assert.equal(started, 0);
+});
+
+test('on macOS a foreground open uses plain open, and a refused open is not reported as opened', async () => {
+  const url = 'http://127.0.0.1:12345/token';
+  let invocation;
+  const exits = code => (command, args, options) => { invocation = { command, args, options }; const child = new EventEmitter(); setImmediate(() => child.emit('exit', code)); return child; };
+  assert.equal(await openQuestionnaireBrowser(url, { platform: 'darwin', env: {}, front: true, spawnImpl: exits(0) }), 'foreground');
+  assert.equal(invocation.command, '/usr/bin/open'); assert.deepEqual(invocation.args, [url]);
+  assert.equal(await openQuestionnaireBrowser(url, { platform: 'darwin', env: {}, front: true, spawnImpl: exits(1) }), false);
+  assert.equal(await openQuestionnaireBrowser(url, { platform: 'darwin', env: {}, spawnImpl: exits(1) }), false);
+});
+
+test('Git is unattended only for a hook that no coding agent runs and no terminal shows', () => {
+  const hook = { delivery: 'hook' };
+  assert.equal(unattendedGit(hook, { env: {}, terminal: false }), true);
+  assert.equal(unattendedGit({ ...hook, host: 'claude' }, { env: {}, terminal: false }), false, 'a coding agent session asked for it');
+  for (const key of ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', ...SESSION_ENV]) assert.equal(unattendedGit(hook, { env: { [key]: '1' }, terminal: false }), false, key);
+  assert.equal(unattendedGit(hook, { env: {}, terminal: true }), false, 'a person is looking at a terminal');
+  assert.equal(unattendedGit({}, { env: {}, terminal: false }), false, 'no Git hook is waiting');
+  assert.equal(unattendedGit(undefined, { env: {}, terminal: false }), false);
+});
+
+test('the page opens in front only for an unattended Git hook, and the output says how it opened', async t => {
+  const opening = async ({ interviewOptions, request, env, result = 'foreground' } = {}) => {
+    const calls = [], f = await fixture(t, { interviewOptions: { terminal: false, openBrowser: async (_url, options) => { calls.push(options); return result; }, ...interviewOptions } });
+    const done = env ? f.interview.present({ request: { ...f.request, ...request }, env: { ...f.env, ...env } }) : f.present({ ...f.request, ...request });
+    await f.waitFor('question'); await f.post('pause'); await done;
+    return { front: calls.map(options => options.front), said: f.output.filter(line => line.startsWith('Sphinx: ')) };
+  };
+  assert.deepEqual(await opening(), { front: [true], said: ['Sphinx: questionnaire opened in your browser.'] });
+  assert.deepEqual((await opening({ request: { host: 'claude' } })).front, [false], 'a coding agent hook');
+  assert.deepEqual((await opening({ env: { CLAUDE_CODE_ENTRYPOINT: 'cli' } })).front, [false], 'the operation environment decides, not the interview default');
+  assert.deepEqual((await opening({ interviewOptions: { terminal: true } })).front, [false], 'a person at a terminal');
+  assert.deepEqual((await opening({ result: 'background' })).said, ['Sphinx: questionnaire opened in a background browser tab. Your coding window stays in place.']);
+  assert.deepEqual((await opening({ result: false })).said, ['Sphinx: open the local URL above. No application was brought to the foreground.']);
+});
+
+// A Git client's hook: nobody at a terminal, and the page opened in front. The clock is shortened.
+const unattended = { terminal: false, openBrowser: async () => 'foreground', abandonMs: 50, watchMs: 10 };
+const stops = f => f.output.filter(line => line.includes('no questionnaire page was open'));
+// A browser tab on the page: it follows the page's event stream until it is closed.
+const openPage = url => new Promise((resolve, reject) => {
+  const request = get(`${url}/events`, response => response.once('data', () => resolve(() => { response.destroy(); request.destroy(); })));
+  request.once('error', reject);
+});
+// The browser shows the page as it opens it, so the page is there before the clock starts.
+const showing = pages => ({ ...unattended, openBrowser: async url => { pages.push(await openPage(url)); return 'foreground'; } });
+
+test('an unattended GUI wait stops after the page stays closed', async t => {
+  const f = await fixture(t, { interviewOptions: unattended }), done = f.present();
+  let rule;
+  for (let i = 0; i < 300 && !rule; i++) { rule = f.interview.state.abandonAfterMs; if (!rule) await delay(1); }
+  assert.equal(rule, 50, 'the page is told while it waits');
+  assert.deepEqual(await done, { status: 'pending', id: f.snapshot.id });
+  assert.deepEqual(stops(f), ['Sphinx: no questionnaire page was open for 1 minute, so this push stopped. Your progress is saved; push again to reopen the questionnaire.']);
+  assert.equal((await checkpointTerminalStatus({ id: f.snapshot.id, env: f.env })).status, 'abandoned');
+});
+
+test('a page that connects as soon as the stop applies already hears of it, before the review starts', async t => {
+  let seen = 'not read';
+  // The check asks for the reviewer plans right after it arms the stop, before it publishes anything else.
+  const f = await fixture(t, { interviewOptions: { ...unattended, findPlans: async () => { seen = f.interview.state.abandonAfterMs; return []; } } });
+  assert.equal((await f.present()).status, 'pending');
+  assert.equal(seen, 50);
+});
+
+test('an open page keeps the unattended wait alive and a quick reconnect does not stop it', async t => {
+  const pages = [], f = await fixture(t, { interviewOptions: showing(pages) }), done = f.present();
+  await f.waitFor('question');
+  for (let tick = 0; tick < 10; tick++) { await delay(10); assert.equal(f.interview.state.phase, 'question'); }
+  // A reload: the stream drops, and the page is back within 20 ms.
+  pages.pop()(); await delay(10); pages.push(await openPage(f.interview.url));
+  await delay(100);
+  assert.equal(f.interview.state.phase, 'question');
+  await f.post('answer', { response: 'Yes, the insert is repeated.' }); await f.confirm();
+  assert.equal((await done).status, 'passed');
+  assert.deepEqual(stops(f), []);
+  pages.pop()();
+});
+
+test('attended terminals, background tabs and unopened pages never stop early', async t => {
+  for (const [terminal, how] of [[true, 'foreground'], [false, 'background'], [false, false]]) {
+    const f = await fixture(t, { interviewOptions: { ...unattended, terminal, openBrowser: async () => how } }), done = f.present();
+    await f.waitFor('question'); await delay(200);
+    assert.deepEqual(stops(f), [], `terminal: ${terminal}, opened: ${how}`);
+    assert.notEqual(f.interview.state.phase, 'paused');
+    assert.equal(f.interview.state.abandonAfterMs, undefined, 'the page is not told of a rule that does not apply');
+    await f.post('pause'); assert.equal((await done).status, 'pending');
+  }
+});
+
+test('a retry waiting on another page keeps waiting, and takes over when that page is abandoned', async t => {
+  const pages = [], f = await fixture(t, { interviewOptions: showing(pages) });
+  // The hook of a push the Git client cancelled lives on and still holds the page.
+  const orphan = await claimCheckpointDialog({ request: f.request, env: f.env, kind: 'browser' });
+  assert.equal(orphan.status, 'claimed');
+  const done = f.present(); await delay(200);
+  assert.equal(f.interview.url, undefined, 'it only waits, so its own clock never starts');
+  assert.deepEqual(stops(f), []);
+  await finishCheckpointDialog({ id: f.snapshot.id, token: orphan.token, status: 'abandoned', env: f.env });
+  await f.waitFor('question');
+  assert.ok(f.interview.url, 'it opens its own page');
+  await f.post('pause'); assert.equal((await done).status, 'pending');
+  pages.pop()();
+});
+
+test('no stray stop after Continue or Skip', async t => {
+  for (const end of ['proceed', 'skip']) {
+    const pages = [], f = await fixture(t, { interviewOptions: showing(pages) }), done = f.present();
+    await f.waitFor('question');
+    if (end === 'skip') assert.equal((await f.post('skip', { response: 'prod is down' })).status, 200);
+    else { await f.post('answer', { response: 'Yes, the insert is repeated.' }); await f.confirm(); }
+    pages.pop()();
+    assert.equal((await done).status, end === 'skip' ? 'skipped' : 'passed');
+    await delay(100);
+    assert.deepEqual(stops(f), [], end);
+    assert.equal((await checkpointTerminalStatus({ id: f.snapshot.id, env: f.env })).status, end === 'skip' ? 'pending' : 'passed');
+  }
 });
 
 test('local page requires its token and rejects cross-origin, rebinding, and stale submissions', async t => {

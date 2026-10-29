@@ -1,7 +1,8 @@
 import path from 'node:path';
 import { settingsTarget } from './user-file.js';
-import { lstat, readFile, mkdir, writeFile, rename, rm, stat } from 'node:fs/promises';
+import { lstat, readFile, mkdir, writeFile, rm, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { renameWithRetry } from './config.js';
 
 const START = '# >>> Sphinx managed MCP server';
 const END = '# <<< Sphinx managed MCP server';
@@ -30,7 +31,7 @@ async function writeText(link, text) {
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   const mode = await stat(file).then(s => s.mode & 0o777).catch(() => 0o600);
   const temporary = `${file}.${randomUUID()}.tmp`;
-  try { await writeFile(temporary, text, { mode, flag: 'wx' }); await rename(temporary, file); }
+  try { await writeFile(temporary, text, { mode, flag: 'wx' }); await renameWithRetry(temporary, file); }
   finally { await rm(temporary, { force: true }); }
 }
 
@@ -101,15 +102,18 @@ function assertNoCodexConflict(text, file) {
   }
 }
 
-export function nativeHookSpecs(name, sessionHandler) {
+export function nativeHookSpecs(name, sessionHandler, platform = process.platform) {
   // A plain command, not an MCP tool call: it needs no MCP connection, so it works
   // in sessions opened before installation and exits silently when nothing is queued.
   const handler = { type: 'command', command: sessionHandler.command, timeout: 1800, statusMessage: 'Sphinx understanding check' };
+  // Claude Code on Windows runs git through its PowerShell tool as well as its Bash tool.
+  // Every other platform and agent matches Bash only.
+  const matcher = name === 'claude' && platform === 'win32' ? 'Bash|PowerShell' : 'Bash';
   return [
     // Codex uses the handler's statusMessage as its /hooks display name too.
     { event: 'SessionStart', group: { hooks: [{ ...sessionHandler, statusMessage: 'Sphinx session setup' }] } },
-    { event: 'PostToolUse', group: { matcher: 'Bash', hooks: [handler] } },
-    ...(name === 'claude' ? [{ event: 'PostToolUseFailure', group: { matcher: 'Bash', hooks: [handler] } }] : []),
+    { event: 'PostToolUse', group: { matcher, hooks: [handler] } },
+    ...(name === 'claude' ? [{ event: 'PostToolUseFailure', group: { matcher, hooks: [handler] } }] : []),
   ];
 }
 

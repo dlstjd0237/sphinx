@@ -18,6 +18,9 @@ import { updateStatus, updatePlan, scheduleUpdate } from './update.js';
 import { modelChoices, validChoice } from './model-choices.js';
 import { setRepositoryDistance } from './repo-config.js';
 import { pullRequestPush, usesSphinxAction } from './github.js';
+import { SESSION_ENV } from './activation.js';
+import { envValue, withoutAddedCwdBlock } from './windows.js';
+import { stderrLine } from './terminal.js';
 
 const ID = /^[a-f0-9]{64}$/u;
 const cancelled = () => Object.assign(new Error('Check paused. Progress is saved.'), { code: 'SPHINX_CANCELLED' });
@@ -29,8 +32,10 @@ const words = event => event === 'pre-commit' ? ['commit', 'Commit'] : ['push', 
 const keptPass = op => `Your pass is saved, so the next ${op} of this change asks only whether to continue.`;
 
 /**
- * A quiet macOS notification that questions are waiting, since the page opens
- * in a background tab. Never steals focus; text travels as arguments, never as
+ * A quiet macOS notification that questions (or the Continue choice) are waiting.
+ * It is sent however the page opened: a terminal or coding agent opens it in a
+ * background tab, and a GUI Git client's push opens it in front, where this is
+ * only a second cue. Never steals focus; text travels as arguments, never as
  * script. Skipped over SSH, in CI, and off macOS. Never throws.
  */
 export function notifyDesktop({ title, message, env = process.env, platform = process.platform, spawnImpl = spawn } = {}) {
@@ -42,22 +47,47 @@ export function notifyDesktop({ title, message, env = process.env, platform = pr
   } catch { return false; }
 }
 
-/** macOS has an explicit background-open flag. Elsewhere print the local URL;
- * do not guess at window-manager focus rules or invoke a foreground opener. */
-export async function openQuestionnaireBrowser(url, { env = process.env, platform = process.platform, spawnImpl = spawn } = {}) {
-  if (offLimits(env) || env.SSH_CONNECTION || env.SSH_TTY || platform !== 'darwin') return false;
+/** The page is the only cue a Git client without a terminal can give, so Windows opens it in front. macOS has an
+ * explicit background-open flag and uses it, unless `front` says nobody watches a terminal or a coding agent.
+ * Elsewhere print the local URL; do not guess at window-manager focus rules or invoke a foreground opener.
+ * Resolves 'background', 'foreground', or false when the page was not opened. */
+export async function openQuestionnaireBrowser(url, { env = process.env, platform = process.platform, spawnImpl = spawn, front = false } = {}) {
+  if (offLimits(env) || env.SSH_CONNECTION || env.SSH_TTY || !['darwin', 'win32'].includes(platform)) return false;
   const parsed = new URL(url);
   if (parsed.protocol !== 'http:' || parsed.hostname !== '127.0.0.1' || !parsed.port) throw new Error('Invalid local questionnaire URL.');
+  if (platform === 'win32') {
+    // Run from System32, not the repository: a browser this call starts would keep that folder locked. rundll32 is a
+    // GUI program, so no windowsHide. Its exit code is always 0 and says nothing, so it is never waited for or killed.
+    // It is not detached and is unref'd, so a rundll32 stuck on a dialog of its own cannot keep the hook running once
+    // Sphinx has stopped: libuv's job object ends it with the hook, while a browser it already started lives on.
+    const system32 = path.win32.join(envValue(env, 'SystemRoot', 'win32') ?? process.env.SystemRoot ?? 'C:\\Windows', 'System32');
+    // Drop the command-search block Sphinx set for itself first: once the filter drops its SPHINX_ marker, it would look like the user's.
+    const clean = Object.fromEntries(Object.entries(withoutAddedCwdBlock(env)).filter(([key]) => !/^(GIT_|SPHINX_)/i.test(key)));
+    return new Promise(resolve => {
+      let child;
+      try { child = spawnImpl(path.win32.join(system32, 'rundll32.exe'), ['url.dll,FileProtocolHandler', url], { cwd: system32, env: clean, stdio: 'ignore' }); }
+      catch { resolve(false); return; }
+      child.once('spawn', () => resolve('foreground'));
+      child.on('error', () => resolve(false)); // after 'spawn' the promise is settled, so a late error only has to be heard
+      child.on('exit', () => {});
+      child.unref?.();
+    });
+  }
   return new Promise(resolve => {
     let child, timer, settled = false;
     const finish = value => { if (!settled) { settled = true; clearTimeout(timer); resolve(value); } };
-    try { child = spawnImpl('/usr/bin/open', ['-g', url], { env, stdio: 'ignore' }); }
+    try { child = spawnImpl('/usr/bin/open', front ? [url] : ['-g', url], { env, stdio: 'ignore' }); }
     catch { finish(false); return; }
     child.once('error', () => finish(false));
-    child.once('exit', code => finish(code === 0));
+    child.once('exit', code => finish(code === 0 ? (front ? 'foreground' : 'background') : false));
     timer = setTimeout(() => { child.kill(); finish(false); }, 5000);
   });
 }
+
+/** Git is waiting on this hook, yet no person looks at a terminal and no known coding agent started it: a Git client
+ * with a window of its own (Sourcetree, Fork, GitHub Desktop) or a script. `env` is the operation's environment and
+ * `terminal` says whether Git's stderr is a terminal. */
+export const unattendedGit = (request, { env, terminal }) => request?.delivery === 'hook' && !request.host && !SESSION_ENV.some(key => env[key]) && !terminal;
 
 async function readBody(req, limit) {
   let bytes = 0; const chunks = [];
@@ -84,11 +114,16 @@ function publicFields(state) {
 export function createBrowserInterview({ env = process.env, signal, timeoutMs = 25 * 60 * 1000,
   store: providedStore, readConfig = loadConfig, revalidate = revalidateSnapshot,
   reserve = claimCheckpointDialog, release = finishCheckpointDialog, waitForExisting = waitForCheckpointTerminal,
-  openBrowser = openQuestionnaireBrowser, notify = notifyDesktop, output = line => process.stderr.write(`${line}\n`), logOverride = recordOverride, findPlans = planProviders,
+  openBrowser = openQuestionnaireBrowser, notify = notifyDesktop, output = stderrLine, logOverride = recordOverride, findPlans = planProviders,
   loadView = loadChangeView, checkUpdate = updateStatus, planUpdate = updatePlan, startUpdate = scheduleUpdate, watchMs = 1000,
+  terminal = !!process.stderr.isTTY, abandonMs = 180000,
 } = {}) {
   const token = randomBytes(32).toString('base64url'), nonce = randomBytes(24).toString('base64');
   let server, origin, url, opened = false, closed = false, active, skip, resolver, sequence = 0, waitingGit = false;
+  // Whether the automatic open put the page in front of the person rather than behind their window.
+  let openedFront = false;
+  // While set, the check stops once no page has been open for this many ms, and the page says so.
+  let abandonAfterMs;
   // A pause stops the waiting Git operation, and this page's server with it, so
   // the only way back is to run it again. Say so, with the command when known.
   // Cut short at the consent step (only Git or the deadline can), the pass is already saved.
@@ -146,7 +181,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
   // Display-only updates (change view, evidence) keep the revision, so they
   // never turn an answer already in flight into a stale submission.
   const publish = (next, { display = false } = {}) => {
-    state = { ...next, messages: transcript, ...(score ? { score } : {}), ...(update ? { update } : {}), ...(repoName ? { repoName } : {}), ...(models ? { models: { groups: models.groups, reviewing: !!reviewAttempt, busy: grading } } : {}), ...(distance ? { distance: { current: distance.current, next: distance.next, scope: distance.scope } } : {}), ...(stamp ? { stamp } : {}), change: viewState(), evidence: evidence && evidence.checkpoint === next.id ? { questionId: evidence.questionId, refs: evidence.refs } : undefined, waitingGit, operationClosed: closed, revision: display ? next.revision : randomUUID(), sequence: ++sequence };
+    state = { ...next, messages: transcript, ...(score ? { score } : {}), ...(update ? { update } : {}), ...(repoName ? { repoName } : {}), ...(models ? { models: { groups: models.groups, reviewing: !!reviewAttempt, busy: grading } } : {}), ...(distance ? { distance: { current: distance.current, next: distance.next, scope: distance.scope } } : {}), ...(stamp ? { stamp } : {}), change: viewState(), evidence: evidence && evidence.checkpoint === next.id ? { questionId: evidence.questionId, refs: evidence.refs } : undefined, waitingGit, abandonAfterMs, operationClosed: closed, revision: display ? next.revision : randomUUID(), sequence: ++sequence };
     const event = `data: ${JSON.stringify(state)}\n\n`;
     for (const stream of streams) writeEvent(stream, event);
   };
@@ -270,7 +305,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
     publish({ ...publicFields(state), phase: 'working', message: data.action === 'answer' ? 'Checking your reasoning…' : data.action === 'learn' ? 'Preparing an explanation…' : data.action === 'dispute' ? 'Reviewing the question…' : 'Continuing the review…' });
     send(res, 202, state); current.resolve(data);
   }
-  async function ensureServer(operationEnv) {
+  async function ensureServer(operationEnv, { front }) {
     if (server) return;
     server = createServer((req, res) => {
       res.on('error', () => res.destroy());
@@ -287,8 +322,11 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
     output(`Sphinx questionnaire: ${url}`);
     if (!opened) {
       opened = true;
-      const automatic = await Promise.resolve().then(() => openBrowser(url, { env: operationEnv })).catch(() => false);
-      output(automatic ? 'Sphinx: questionnaire opened in a background browser tab. Your coding window stays in place.' : 'Sphinx: open the local URL above. No application was brought to the foreground.');
+      const how = await Promise.resolve().then(() => openBrowser(url, { env: operationEnv, front })).catch(() => false);
+      openedFront = how === 'foreground';
+      output(how === 'foreground' ? 'Sphinx: questionnaire opened in your browser.'
+        : how === 'background' ? 'Sphinx: questionnaire opened in a background browser tab. Your coding window stays in place.'
+        : 'Sphinx: open the local URL above. No application was brought to the foreground.');
     }
   }
   function startView(request, snapshot, config, operationEnv, store) {
@@ -333,7 +371,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
     requestSignal?.addEventListener('abort', cancel, { once: true });
     if (requestSignal?.aborted) cancel();
     const timer = setTimeout(() => controller.abort(cancelled()), timeoutMs);
-    let reservation, finalStatus = 'pending';
+    let reservation, finalStatus = 'pending', abandonWatch;
     const skipped = async () => {
       // A human chose to let Git continue. Close the check and log it; never write a receipt.
       await store.skip?.(request.id).catch(() => {});
@@ -350,11 +388,16 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
     const store = providedStore || createSessionStore({ env: operationEnv, validate });
     try {
       localSignal.throwIfAborted();
-      reservation = await reserve({ request, env: operationEnv, kind: 'browser' });
-      if (reservation?.status !== 'claimed') {
+      for (;;) {
+        reservation = await reserve({ request, env: operationEnv, kind: 'browser' });
+        if (reservation?.status === 'claimed') break;
         const status = await waitForExisting({ id: request.id, env: operationEnv, timeoutMs, signal: localSignal });
+        // Nobody kept that page open, so this one asks instead. The pause keeps a lock another
+        // process still holds from turning this into a busy loop, as for the other lock waits.
+        if (status === 'abandoned') { await delay(50, undefined, { signal: localSignal }); continue; }
         // Passed in another window while Git waits on this one: this page still asks before it goes through.
         if (status !== 'passed' || !waitingGit || request.more) return { status: status === 'passed' || status === 'stopped' ? status : 'pending', id: request.id };
+        break;
       }
       const session = await store.read(request.id), config = await readConfig(request.repoRoot, operationEnv);
       if (session.snapshot.repoRoot !== request.repoRoot) throw new Error('This checkpoint belongs to another repository.');
@@ -363,7 +406,25 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
       await refreshScore(request.repoRoot, operationEnv).catch(() => {});
       let visible = store.public(session);
       publish({ ...publicFields(visible), repoRoot: request.repoRoot, phase: 'working', message: 'Preparing your understanding check…' });
-      await ensureServer(operationEnv);
+      const unattended = unattendedGit(request, { env: operationEnv, terminal });
+      await ensureServer(operationEnv, { front: unattended });
+      // A Git client shows nothing while its hook waits, and a push it cancelled can leave the hook
+      // waiting: once no page has stayed open for abandonMs, stop as the deadline does.
+      if (unattended && openedFront) {
+        const [op] = words(session.snapshot.event), minutes = Math.max(1, Math.round(abandonMs / 60000));
+        let lastSeen = Date.now();
+        abandonAfterMs = abandonMs;
+        // A page that connects before the next update already says the wait ends.
+        publish(state, { display: true });
+        abandonWatch = setInterval(() => {
+          if (streams.size) lastSeen = Date.now();
+          else if (Date.now() - lastSeen >= abandonMs && !controller.signal.aborted) {
+            output(`Sphinx: no questionnaire page was open for ${minutes} minute${minutes === 1 ? '' : 's'}, so this ${op} stopped. Your progress is saved; ${op} again to reopen the questionnaire.`);
+            finalStatus = 'abandoned'; controller.abort(cancelled());
+          }
+        }, watchMs);
+        abandonWatch.unref();
+      }
       const notes = [];
       const recoveryUI = { warning: text => notes.push(text), note: text => notes.push(text), command: () => {} };
       const plans = await findPlans(operationEnv).catch(() => []);
@@ -447,7 +508,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
       while (visible.status !== 'passed') {
         localSignal.throwIfAborted();
         showQuestion(visible); refreshEvidence(request.id);
-        // The page opened in a background tab; say once that questions are ready.
+        // The page may be in a background tab; say once that questions are ready.
         if (!notified) { notified = true; notify({ title: 'Sphinx needs your answers', message: where, env: operationEnv }); }
         // Answers can also arrive from sphinx answer or a terminal check. Follow
         // the saved session so this page, and the Git operation waiting on it, keep up.
@@ -544,6 +605,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
       else publish({ ...publicFields(state), repoRoot: request.repoRoot, phase: localSignal.aborted ? 'paused' : 'error', message: localSignal.aborted ? pauseMessage() : 'The check could not finish. Saved progress and completed checkpoints are retained.', ...(localSignal.aborted ? (resumeCommand ? { resume: resumeCommand } : {}) : { error: error.message }) });
       return { status: 'pending', id: request.id };
     } finally {
+      clearInterval(abandonWatch); abandonAfterMs = undefined;
       clearTimeout(timer); requestSignal?.removeEventListener('abort', cancel); resolver?.reject(cancelled()); resolver = undefined;
       if (reservation?.status === 'claimed') await release({ id: request.id, token: reservation.token, status: finalStatus, env: operationEnv });
       // Write settings chosen for future checks on close(). Distance is part of a

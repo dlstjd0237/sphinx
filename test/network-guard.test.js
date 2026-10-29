@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync, execSync, spawn, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import '../scripts/outbound-guard.mjs';
 
@@ -35,4 +35,17 @@ test('a loopback redirect cannot escape to an outbound provider', async t => {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
   await assert.rejects(fetch(`http://127.0.0.1:${server.address().port}/`), error => error.code === 'SPHINX_TEST_NETWORK_BLOCKED' || error.cause?.code === 'SPHINX_TEST_NETWORK_BLOCKED');
+});
+
+// Windows cannot start the extensionless fixture CLIs, so PATH lookup would fall through to the real installs.
+// Every blocked call must be refused before a process starts; only --version or no arguments is ever passed.
+test('on Windows, tests cannot start a real claude, codex, or gh CLI', { skip: process.platform !== 'win32' }, async () => {
+  const blocked = { code: 'SPHINX_TEST_CLI_BLOCKED' };
+  assert.throws(() => spawn('claude', ['--version']), blocked);
+  assert.throws(() => execFileSync('codex.cmd', ['--version']), blocked);
+  assert.throws(() => spawnSync('C:\\Users\\x\\.local\\bin\\claude.exe', []), blocked);
+  assert.throws(() => execSync('gh --version'), blocked);
+  assert.throws(() => execSync('"C:\\Program Files\\GitHub CLI\\gh.exe" --version'), blocked);
+  await assert.rejects(async () => promisify(execFile)('claude', ['--version']), blocked);
+  assert.match(execFileSync('git', ['--version'], { encoding: 'utf8' }), /^git version/u);
 });

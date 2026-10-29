@@ -41,7 +41,7 @@ async function createOnly(file, contents) {
  */
 export async function excludeFromGit(root, file) {
   try {
-    const { stdout } = await promisify(execFile)('git', ['rev-parse', '--git-path', 'info/exclude'], { cwd: root });
+    const { stdout } = await promisify(execFile)('git', ['rev-parse', '--git-path', 'info/exclude'], { cwd: root, windowsHide: true });
     const exclude = path.resolve(root, stdout.trim());
     const current = await readFile(exclude, 'utf8').catch(() => '');
     if (current.split('\n').some(line => line.trim() === `/${file}`)) return true;

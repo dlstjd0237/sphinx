@@ -1,9 +1,8 @@
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { loadConfig, repositoryConfigInfo, readJson, REPOSITORY_CONFIG_KEYS, stableStringify, validateRepositoryConfig } from './config.js';
+import { loadConfig, openNoFollow, repositoryConfigInfo, readJson, REPOSITORY_CONFIG_KEYS, stableStringify, validateRepositoryConfig } from './config.js';
 import { compileIgnore, loadIgnorePolicy } from './ignore.js';
 import { PROJECT_CONTEXT_FILE, PROJECT_CONTEXT_MAX_BYTES, isContextTemplate, contextWithDescription } from './repo-context.js';
 import { initializeRepository } from './repo-config.js';
@@ -21,7 +20,7 @@ const INFORMATIONAL_KEYS = ['version', 'detected', 'nextStep'];
 
 const run = promisify(execFile);
 async function git(cwd, args, maxBuffer = 1024 * 1024) {
-  try { return (await run('git', args, { cwd, encoding: 'utf8', maxBuffer, timeout: 10000 })).stdout; }
+  try { return (await run('git', args, { cwd, encoding: 'utf8', maxBuffer, timeout: 10000, windowsHide: true })).stdout; }
   catch { return null; }
 }
 
@@ -42,7 +41,7 @@ export const looksSecret = text => SECRET_PATTERNS.some(pattern => pattern.test(
 async function readSmall(root, name, max = 256 * 1024) {
   let handle;
   try {
-    handle = await open(path.join(root, name), constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+    handle = await openNoFollow(path.join(root, name), constants.O_RDONLY);
     const info = await handle.stat();
     if (!info.isFile() || info.size > max) return null;
     return await handle.readFile('utf8');
@@ -243,7 +242,7 @@ export function validateProposal(proposal, { env = process.env } = {}) {
 async function readRegular(file) {
   let handle;
   try {
-    handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+    handle = await openNoFollow(file, constants.O_RDONLY);
     if (!(await handle.stat()).isFile()) throw new Error(`Refusing to edit a non-regular file: ${file}`);
     return await handle.readFile('utf8');
   } catch (error) {
@@ -254,9 +253,11 @@ async function readRegular(file) {
 }
 
 async function writeRegular(file, text, flags) {
-  const handle = await open(file, flags | constants.O_WRONLY | (constants.O_NOFOLLOW || 0));
+  // Windows rejects O_TRUNC without O_CREAT (EINVAL), so truncate through the handle, once it is known to be a regular file.
+  const handle = await openNoFollow(file, (flags & ~constants.O_TRUNC) | constants.O_WRONLY);
   try {
     if (!(await handle.stat()).isFile()) throw new Error(`Refusing to edit a non-regular file: ${file}`);
+    if (flags & constants.O_TRUNC) await handle.truncate(0);
     await handle.writeFile(text);
   } finally { await handle.close(); }
 }

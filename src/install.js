@@ -1,11 +1,12 @@
-import { access, chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, readFile, readdir, realpath, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { settingsTarget } from './user-file.js';
 import { constants } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { constants as osConstants } from 'node:os';
-import { getPaths } from './config.js';
+import { getPaths, renameWithRetry } from './config.js';
+import { RUN_HOOK, msys2Quote, withoutAddedCwdBlock } from './windows.js';
 import { nativeHookSpecs, installedHookSpecs, hasHook, addHook, removeHook, prepareMcp, commitMcp, rollbackMcp, removeMcp, inspectMcp } from './agent-settings.js';
 import { lifecycleHome, prepareCursorIntegration, prepareOpenCodeIntegration, removeLifecycleIntegration, lifecycleIntegrationStatus } from './lifecycle-integrations.js';
 import { preparePiIntegration, removePiIntegration, piIntegrationStatus, piIntegrationHome } from './pi-integration.js';
@@ -23,31 +24,61 @@ const GATED = new Set(['pre-push', 'pre-commit']);
 const PREPARED = new Set(['post-commit', 'post-merge', 'post-rewrite', 'post-checkout']);
 const hash = value => createHash('sha256').update(value).digest('hex');
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+// Native Windows hooks start node.exe and the CLI by their paths at install, which a pnpm update or removing a Node version deletes.
+const launchGone = (file, repo) => `Sphinx's hooks start ${file}, which no longer exists. Run sphinx install${repo ? ' --repo' : ''}.`;
 
 /**
  * The shell command hooks use to run Sphinx. Prefer the package manager's own
  * `sphinx` on PATH (an npm/yarn symlink or a pnpm/bun shim): it survives
  * upgrades, unlike a versioned store path. Node's directory is put first on
  * PATH so GUI-launched agents without a login PATH still find node. A checkout
- * without such a shim falls back to absolute node and CLI paths.
+ * without such a shim falls back to absolute node and CLI paths. Native Windows
+ * always does: Git's sh splits a `PATH='C:\...':"$PATH"` prefix at the drive
+ * colon, so it would only work in repositories on drive C:, and Windows files
+ * carry no execute bit to recognise a shim by.
+ * On macOS, a GUI Git client runs hooks with launchd's PATH, which lacks ~/.local/bin, Homebrew and nvm, so the
+ * directories where claude, codex and gh are found go after $PATH, in their PATH order. After it, so they never shadow the
+ * client's own git or system tools; installing a reviewer CLI somewhere else later takes another `sphinx install`.
  * Returns shell `env` assignments (placed before any exec) and the `command`.
  */
-export async function sphinxLauncher(cliPath, env = process.env, execPath = process.execPath) {
+export async function sphinxLauncher(cliPath, env = process.env, execPath = process.execPath, platform = process.platform) {
+  if (platform === 'win32') return { env: '', command: `${quote(execPath)} ${quote(cliPath)}` };
+  const directories = String(env.PATH || '').split(path.delimiter).filter(dir => path.isAbsolute(dir));
+  // Looked up on the absolute entries only: a relative one would resolve against whichever repository the hook runs in.
+  const absolute = { PATH: directories.join(path.delimiter) };
+  const found = platform === 'darwin' ? await Promise.all(['claude', 'codex', 'gh'].map(name => executable(name, absolute))) : [];
+  const extra = [...new Set(directories.filter(directory => found.includes(directory)))].map(directory => `:${quote(directory)}`).join('');
   const real = await realpath(cliPath).catch(() => cliPath);
-  for (const directory of String(env.PATH || '').split(path.delimiter).filter(dir => path.isAbsolute(dir))) {
+  for (const directory of directories) {
     const candidate = path.join(directory, 'sphinx');
     try {
       const info = await stat(candidate);
       if (!info.isFile() || !(info.mode & 0o111)) continue;
       const matches = await realpath(candidate) === real
         || (info.size < 64 * 1024 && (await readFile(candidate, 'utf8')).includes('sphinx-understand/bin/sphinx.js'));
-      if (matches) return { env: `PATH=${quote(path.dirname(execPath))}:"$PATH" `, command: quote(candidate) };
+      if (matches) return { env: `PATH=${quote(path.dirname(execPath))}:"$PATH"${extra} `, command: quote(candidate) };
     } catch { /* Not a usable shim. */ }
   }
-  return { env: '', command: `${quote(execPath)} ${quote(cliPath)}` };
+  return { env: extra ? `PATH="$PATH"${extra} ` : '', command: `${quote(execPath)} ${quote(cliPath)}` };
 }
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const AGENTS = ['codex', 'claude', 'pi', 'cursor', 'opencode'];
+export const WINDOWS_AGENT_HINT = 'On Windows, Sphinx installs Git hooks only. Add the optional Claude Code integration with sphinx install --agents claude.';
+
+/**
+ * Native Windows runs the Git hooks and, only when asked for, Claude Code.
+ * `agents` is `auto`, `none`, a comma-separated list, or an array; `auto` and
+ * `none` never name an unsupported agent. Only known agents are named, once
+ * each; a misspelled name or an empty entry is left to the name validation.
+ * Call it before anything is saved, credentials included, so a rejected
+ * selection leaves no trace.
+ */
+export function checkAgentPlatform(agents, platform = process.platform) {
+  if (platform !== 'win32') return;
+  const selected = Array.isArray(agents) ? agents : agents === 'auto' || agents === 'none' ? [] : agents.split(',').map(name => name.trim());
+  const names = [...new Set(selected)].filter(name => name !== 'claude' && AGENTS.includes(name));
+  if (names.length) throw new Error(`Native Windows supports Git hooks and the optional Claude Code integration (--agents claude). ${names.join(', ')} ${names.length > 1 ? 'are' : 'is'} not supported on native Windows yet; use WSL.`);
+}
 
 function gitEnvironment(env) {
   // An explicit integration home must never write the caller's real global file.
@@ -59,7 +90,7 @@ function gitEnvironment(env) {
 
 async function git(args, cwd, env, accepted = [0]) {
   return new Promise((resolve, reject) => {
-    const child = spawn('git', args, { cwd, env: gitEnvironment(env), stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('git', args, { cwd, env: gitEnvironment(env), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let stdout = '', stderr = '';
     child.stdout.on('data', data => { stdout += data; });
     child.stderr.on('data', data => { stderr += data; });
@@ -75,6 +106,12 @@ async function exists(file) {
     if (error.code === 'ENOENT') return false;
     throw error;
   }
+}
+
+// The first file of a recorded Windows `launch` that can no longer be opened, if any.
+async function missingLaunchFile(launch) {
+  for (const file of launch ? [launch.node, launch.cli] : []) if (!await access(file).then(() => true, () => false)) return file;
+  return null;
 }
 
 async function readJson(file, fallback) {
@@ -97,7 +134,7 @@ async function writeJson(link, value) {
   const temporary = `${file}.${randomUUID()}.tmp`;
   try {
     await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode });
-    await rename(temporary, file);
+    await renameWithRetry(temporary, file);
   } finally {
     await rm(temporary, { force: true });
   }
@@ -144,19 +181,27 @@ function sourceShell(source) {
     : 'if ! hook_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then\n  if [ -z "${GIT_DIR:-}" ] || [ ! -d "$GIT_DIR" ]; then\n    git rev-parse --git-common-dir >/dev/null\n    exit 128\n  fi\n  hook_dir=$GIT_DIR\nfi\nhook_dir="$hook_dir/hooks"\n';
 }
 
-function hookScript({ event, source, launcher, home, id }) {
+function hookScript({ event, source, launcher, home, id, platform = process.platform, launch }) {
   const header = '#!/bin/sh\n# Managed by Sphinx. Existing hooks remain in their original directory.\n';
   if (GATED.has(event)) {
-    return `${header}SPHINX_HOME=${quote(home)} SPHINX_INSTALL_ID=${quote(id)} ${launcher.env}exec ${launcher.command} hook git ${quote(event)} "$@"\n`;
+    // `launch` is recorded on Windows only. A Git client shows a failed hook's output as its error, so name the missing file
+    // and the fix instead of Node's stack trace; the operation still stops.
+    const present = launch ? [launch.node, launch.cli].map(file => `[ -e ${quote(file)} ] || { printf '%s\\n' ${quote(launchGone(file, id !== 'global'))} >&2; exit 1; }\n`).join('') : '';
+    return `${header}${present}SPHINX_HOME=${quote(home)} SPHINX_INSTALL_ID=${quote(id)} ${launcher.env}exec ${launcher.command} hook git ${quote(event)} "$@"\n`;
   }
+  // Git's sh alone would not find the interpreter of a Windows hook's `#!` line the way Git does, so native Windows runs the
+  // existing hook through run_hook. Everywhere else the scripts are exactly as they always were.
+  const windows = platform === 'win32';
+  const runner = windows ? `# Start the hook as Git for Windows does: by the interpreter's name in its #! line, without its options.\n${RUN_HOOK}\n` : '';
   if (PREPARED.has(event)) {
     // The existing hook retains streaming stdin and its exit status. Scheduling
     // has no terminal, runs asynchronously, and never gates the Git operation.
-    return `${header}${sourceShell(source)}hook="$hook_dir/${event}"\nstatus=0\nif [ -x "$hook" ]; then\n  "$hook" "$@"\n  status=$?\nfi\nif [ "\${SPHINX_EVALUATOR:-}" != "1" ]; then\n  SPHINX_HOME=${quote(home)} ${launcher.env}${launcher.command} prepare </dev/null >/dev/null 2>&1 &\nfi\nexit "$status"\n`;
+    // run_hook replaces its shell, so on Windows a subshell keeps this script alive for the scheduling below.
+    return `${header}${runner}${sourceShell(source)}hook="$hook_dir/${event}"\nstatus=0\nif [ -x "$hook" ]; then\n  ${windows ? '(run_hook "$hook" "$@")' : '"$hook" "$@"'}\n  status=$?\nfi\nif [ "\${SPHINX_EVALUATOR:-}" != "1" ]; then\n  SPHINX_HOME=${quote(home)} ${launcher.env}${launcher.command} prepare </dev/null >/dev/null 2>&1 &\nfi\nexit "$status"\n`;
   }
   // Protocol hooks such as proc-receive must retain streaming stdin/stdout.
   // They exec the prior hook directly rather than buffering input in Node.
-  return `${header}${sourceShell(source)}hook="$hook_dir/${event}"\nif [ -x "$hook" ]; then\n  exec "$hook" "$@"\nfi\nexit 0\n`;
+  return `${header}${runner}${sourceShell(source)}hook="$hook_dir/${event}"\nif [ -x "$hook" ]; then\n  ${windows ? 'run_hook' : 'exec'} "$hook" "$@"\nfi\nexit 0\n`;
 }
 
 async function hookNames(source, cwd, env) {
@@ -173,12 +218,13 @@ async function hookNames(source, cwd, env) {
   return [...new Set([...HOOKS, ...existing.filter(name => /^[a-z][a-z0-9-]*$/.test(name))])];
 }
 
+// The first PATH directory that holds `name` (as written on PATH), or null.
 async function executable(name, env) {
   for (const directory of (env.PATH || '').split(path.delimiter)) {
     if (!directory) continue;
-    try { await access(path.join(directory, name), constants.X_OK); return true; } catch {}
+    try { await access(path.join(directory, name), constants.X_OK); return directory; } catch {}
   }
-  return false;
+  return null;
 }
 
 async function detectedAgents({ paths, env, manifest }) {
@@ -189,16 +235,30 @@ async function detectedAgents({ paths, env, manifest }) {
     (await executable(name, env) || await exists(integrationHome(name)) || manifest.agents[name]) ? name : null))).filter(Boolean);
 }
 
-export async function detectAgents({ env = process.env } = {}) {
+export async function detectAgents({ env = process.env, platform = process.platform } = {}) {
+  if (platform === 'win32') return [];
   const { paths, manifest } = await manifestFor(env);
   return detectedAgents({ paths, env, manifest });
 }
 
-async function prepareAgents({ agents, paths, env, cliPath, launcher, manifest }) {
+// The shell command a coding agent's Sphinx hooks run. Claude Code on Windows runs it with bash -c, and MSYS2 halves every run
+// of backslashes on that command line, so `\\server\share` would arrive as `\server\share`; spelled `//server/share`, a UNC path
+// arrives intact. There the launcher is always node.exe and the CLI by path, so both are spelled that way too. Git hook scripts
+// are files, read as they are, and keep their spelling.
+export function agentHookCommand({ name, home, launcher, cliPath, execPath = process.execPath, platform = process.platform }) {
+  if (platform !== 'win32') return `SPHINX_HOME=${quote(home)} ${launcher.env}${launcher.command} hook agent ${name}`;
+  const bash = file => file.startsWith('\\\\') ? file.replaceAll('\\', '/') : file;
+  return `SPHINX_HOME=${quote(bash(home))} ${quote(bash(execPath))} ${quote(bash(cliPath))} hook agent ${name}`;
+}
+
+async function prepareAgents({ agents, paths, env, cliPath, launcher, manifest, platform = process.platform }) {
+  // `auto` on native Windows detects no agent, but still refreshes a Claude Code integration the user opted into:
+  // its hook command and MCP server embed the CLI path, which an update can move.
   const selected = agents === 'auto'
-    ? await detectedAgents({ paths, env, manifest })
+    ? platform === 'win32' ? (manifest.agents.claude ? ['claude'] : []) : await detectedAgents({ paths, env, manifest })
     : agents === 'none' ? [] : Array.isArray(agents) ? agents : agents.split(',').map(x => x.trim());
   if ((!selected.length && agents !== 'auto' && agents !== 'none') || selected.some(name => !AGENTS.includes(name))) throw new Error('--agents must be auto, none, or a comma-separated list of codex, claude, pi, cursor, opencode.');
+  checkAgentPlatform(selected, platform); // Before any settings file is read: a rejected selection changes nothing.
   const result = [];
   for (const name of new Set(selected)) {
     if (['pi', 'cursor', 'opencode'].includes(name)) {
@@ -209,9 +269,9 @@ async function prepareAgents({ agents, paths, env, cliPath, launcher, manifest }
     const file = path.join(paths[`${name}Home`], name === 'codex' ? 'hooks.json' : 'settings.json');
     const document = await readJson(file, {});
     if (document.hooks !== undefined && (!document.hooks || typeof document.hooks !== 'object' || Array.isArray(document.hooks))) throw new Error(`Invalid hooks object in ${file}`);
-    const command = `SPHINX_HOME=${quote(paths.home)} ${launcher.env}${launcher.command} hook agent ${name}`;
+    const command = agentHookCommand({ name, home: paths.home, launcher, cliPath, platform });
     const handler = { type: 'command', command, timeout: 10 };
-    const hooks = nativeHookSpecs(name, handler);
+    const hooks = nativeHookSpecs(name, handler, platform);
     for (const { event } of hooks) {
       if (document.hooks?.[event] !== undefined && (!Array.isArray(document.hooks[event]) || document.hooks[event].some(group => !group || typeof group !== 'object' || !Array.isArray(group.hooks)))) throw new Error(`Invalid ${event} hooks in ${file}`);
     }
@@ -234,17 +294,18 @@ export async function installedAgents({ env = process.env } = {}) {
   return AGENTS.filter(name => manifest.agents[name]);
 }
 
-export async function install({ config, agents = 'auto', repo = false, cwd = process.cwd(), env = process.env, cliPath }) {
+export async function install({ config, agents = 'auto', repo = false, cwd = process.cwd(), env = process.env, cliPath, platform = process.platform }) {
   if (!cliPath || !path.isAbsolute(cliPath)) throw new Error('Installation requires an absolute CLI path.');
-  if (process.platform === 'win32') throw new Error('Use Sphinx from WSL; native Windows installation is not supported yet.');
   const { paths, manifest } = await manifestFor(env);
   const messages = [], warnings = [];
   const info = repo ? await repoInfo(cwd, env) : { id: 'global', scope: '--global', root: null };
   const id = info.id;
   const previous = manifest.installs[id];
   // Validate every selected settings file before mutating any integration.
-  const launcher = await sphinxLauncher(cliPath, env);
-  const agentPlans = await prepareAgents({ agents, paths, env, cliPath, launcher, manifest });
+  const launcher = await sphinxLauncher(cliPath, env, process.execPath, platform);
+  // What the Windows hooks, and the Claude Code hook and MCP server, start by path, so doctor can tell when an update moved it.
+  const launch = platform === 'win32' ? { node: process.execPath, cli: cliPath } : undefined;
+  const agentPlans = await prepareAgents({ agents, paths, env, cliPath, launcher, manifest, platform });
   const scopeValues = await currentConfig(info.scope, cwd, env);
   if (previous && scopeValues.at(-1) !== previous.hookDir) {
     throw new Error('Git hooks changed since Sphinx was installed. Run sphinx uninstall first; your current configuration will be preserved.');
@@ -261,7 +322,7 @@ export async function install({ config, agents = 'auto', repo = false, cwd = pro
   });
   if (directoryState?.isSymbolicLink()) throw new Error(`Refusing to replace a symlinked hook directory: ${entry.hookDir}`);
   const names = await hookNames(entry.source, cwd, env);
-  const scripts = names.map(event => ({ event, content: hookScript({ event, source: entry.source, launcher, home: paths.home, id }) }));
+  const scripts = names.map(event => ({ event, content: hookScript({ event, source: entry.source, launcher, home: paths.home, id, platform, launch }) }));
   for (const { event, content } of scripts) {
     const file = path.join(entry.hookDir, event);
     const fileState = await lstat(file).catch(error => {
@@ -282,6 +343,7 @@ export async function install({ config, agents = 'auto', repo = false, cwd = pro
     entry.files[event] = hash(content);
   }
   entry.preparationVersion = 1;
+  if (launch) entry.launch = launch;
   manifest.installs[id] = entry;
   await writeJson(paths.install, manifest);
   await git(['config', info.scope, '--replace-all', 'core.hooksPath', entry.hookDir], cwd, env);
@@ -304,11 +366,11 @@ export async function install({ config, agents = 'auto', repo = false, cwd = pro
       if (!same(await readJson(file, {}), plan.originalDocument)) throw new Error(`Settings changed during installation: ${file}. Retry installation.`);
       await writeJson(file, document);
     } catch (error) { await rollbackMcp(mcp); throw error; }
-    manifest.agents[name] = { file, handler, hooks, existed, emptyEvents, mcp: mcp.record };
+    manifest.agents[name] = { file, handler, hooks, existed, emptyEvents, mcp: mcp.record, ...(launch ? { launch } : {}) };
     await writeJson(paths.install, manifest);
     messages.push(`${name === 'codex' ? 'Codex' : 'Claude Code'} native questionnaire hooks and Sphinx MCP server installed.`);
   }
-  if (!agentPlans.length && agents === 'auto') warnings.push('No supported coding agent was detected. Install one, then rerun sphinx install; Git hooks are ready.');
+  if (!agentPlans.length && agents === 'auto') warnings.push(platform === 'win32' ? WINDOWS_AGENT_HINT : 'No supported coding agent was detected. Install one, then rerun sphinx install; Git hooks are ready.');
   if (!repo) {
     try {
       await git(['rev-parse', '--git-dir'], cwd, env);
@@ -387,7 +449,7 @@ export async function uninstall({ env = process.env, cwd = process.cwd(), repo =
   return { messages, warnings };
 }
 
-export async function dispatchHook({ event, args = [], input = '', cwd = process.cwd(), env = process.env, gate }) {
+export async function dispatchHook({ event, args = [], input = '', cwd = process.cwd(), env = process.env, gate, spawnImpl = spawn, platform = process.platform }) {
   if (!/^[a-z][a-z0-9-]*$/.test(event)) throw new Error('Invalid Git hook event.');
   const { manifest } = await manifestFor(env);
   let entry = manifest.installs[env.SPHINX_INSTALL_ID];
@@ -400,14 +462,31 @@ export async function dispatchHook({ event, args = [], input = '', cwd = process
   const directory = entry.source.kind === 'path' ? path.resolve(cwd, entry.source.value)
     : path.join(await git(['rev-parse', '--path-format=absolute', '--git-common-dir'], cwd, env), 'hooks');
   const original = path.join(directory, event);
-  let isExecutable = false;
-  try { await access(original, constants.X_OK); isExecutable = true; } catch (error) {
-    if (!['ENOENT', 'ENOTDIR', 'EACCES'].includes(error.code)) throw error;
-  }
-  if (isExecutable) {
+  const runnable = async file => {
+    try { await access(file, constants.X_OK); return true; } catch (error) {
+      if (!['ENOENT', 'ENOTDIR', 'EACCES'].includes(error.code)) throw error;
+      return false;
+    }
+  };
+  const isExecutable = await runnable(original);
+  // When <event> is missing, Git for Windows runs <event>.exe instead (STRIP_EXTENSION).
+  const exe = !isExecutable && platform === 'win32' && await runnable(`${original}.exe`) ? `${original}.exe` : null;
+  if (isExecutable || exe) {
+    const stdio = [event === 'pre-commit' ? 'inherit' : 'pipe', 'inherit', 'inherit'];
     const code = await new Promise((resolve, reject) => {
-      const child = spawn(original, args, { cwd, env: { ...env, SPHINX_HOOK_DEPTH: '1' }, stdio: [event === 'pre-commit' ? 'inherit' : 'pipe', 'inherit', 'inherit'] });
-      child.stdin?.on('error', error => { if (error.code !== 'EPIPE') reject(error); });
+      // Windows cannot start an extensionless `#!` script, so Git's sh runs it, finding the interpreter by the name in its
+      // shebang as Git does (RUN_HOOK). MSYS2 strips quotes from and globs unquoted arguments, so every one is quoted. The hook
+      // searches for commands as it would under Git alone; libuv reads the cwd-search block from this process, so finding `sh`
+      // stays protected. Its $0 has forward slashes, as Git for Windows gives it, for hooks that use "${0##*/}" or "${0%/*}".
+      // An .exe hook is a program, which Git starts with CreateProcess and its arguments unchanged. So is it here: through sh,
+      // MSYS2 would turn a POSIX-looking argument such as /srv/git/repo.git into a path inside Git's own folder.
+      const child = exe
+        ? spawnImpl(exe, args, { cwd, env: withoutAddedCwdBlock({ ...env, SPHINX_HOOK_DEPTH: '1' }), stdio })
+        : platform === 'win32'
+          ? spawnImpl('sh', ['-c', `${RUN_HOOK}\nrun_hook "$0" "$@"`, original.replaceAll('\\', '/'), ...args].map(msys2Quote), { cwd, env: withoutAddedCwdBlock({ ...env, SPHINX_HOOK_DEPTH: '1' }), stdio, windowsVerbatimArguments: true })
+          : spawnImpl(original, args, { cwd, env: { ...env, SPHINX_HOOK_DEPTH: '1' }, stdio });
+      // A hook may exit without reading stdin: EPIPE on POSIX, EOF on Windows.
+      child.stdin?.on('error', error => { if (!['EPIPE', 'EOF'].includes(error.code)) reject(error); });
       child.on('error', reject);
       child.on('close', (status, signal) => resolve(status ?? (osConstants.signals[signal] ? 128 + osConstants.signals[signal] : 1)));
       child.stdin?.end(input);
@@ -418,34 +497,39 @@ export async function dispatchHook({ event, args = [], input = '', cwd = process
   return gate({ event, args, input, cwd });
 }
 
-export async function doctor({ env = process.env, cwd = process.cwd() } = {}) {
+export async function doctor({ env = process.env, cwd = process.cwd(), platform = process.platform } = {}) {
   const { paths, manifest } = await manifestFor(env);
   const checks = [];
   const global = manifest.installs.global;
   const globalValue = await git(['config', '--global', '--includes', '--path', '--get', 'core.hooksPath'], cwd, env, [0, 1]);
-  checks.push({ name: 'Global Git hooks', ok: !!global && globalValue === global.hookDir, detail: globalValue || 'Not installed' });
+  // Outside a repository there are no dispatcher rows, so this row is where a moved Windows file shows up.
+  const globalMoved = await missingLaunchFile(global?.launch);
+  checks.push({ name: 'Global Git hooks', ok: !!global && globalValue === global.hookDir && !globalMoved, detail: globalMoved ? launchGone(globalMoved, false) : globalValue || 'Not installed' });
   try {
     await git(['rev-parse', '--git-dir'], cwd, env);
     const effective = await git(['config', '--path', '--get', 'core.hooksPath'], cwd, env, [0, 1]);
     const entry = Object.values(manifest.installs).find(item => item.hookDir === effective);
     checks.push({ name: 'Current repository', ok: !!entry, detail: entry ? `Sphinx active: ${effective}` : 'Not covered. A local, worktree, or conditional override may require sphinx install --repo.' });
     if (entry) {
+      const moved = await missingLaunchFile(entry.launch);
       for (const name of [...GATED, ...PREPARED]) {
         const file = path.join(entry.hookDir, name);
         const content = await readFile(file).catch(() => null);
         let runnable = false;
         try { await access(file, constants.X_OK); runnable = true; } catch {}
         const preparationCurrent = !PREPARED.has(name) || entry.preparationVersion === 1;
-        checks.push({ name: `${name} dispatcher`, ok: preparationCurrent && runnable && content !== null && hash(content) === entry.files[name], detail: preparationCurrent ? file : 'Background preparation hooks need updating. Run sphinx install.' });
+        checks.push({ name: `${name} dispatcher`, ok: !moved && preparationCurrent && runnable && content !== null && hash(content) === entry.files[name], detail: moved ? launchGone(moved, entry.id !== 'global') : preparationCurrent ? file : 'Background preparation hooks need updating. Run sphinx install.' });
       }
     }
   } catch { checks.push({ name: 'Current repository', ok: true, detail: 'Not inside a Git repository; global installation still applies to other repositories.' }); }
   for (const name of AGENTS) {
     const installed = manifest.agents[name];
+    // An agent that native Windows does not support is not an option to offer there; one already installed is still checked.
+    const notSelected = platform === 'win32' && name !== 'claude' ? 'Not supported on native Windows yet.' : `Not selected. Optional: sphinx install --agents ${name}.`;
     if (['pi', 'cursor', 'opencode'].includes(name)) {
       const result = await (name === 'pi' ? piIntegrationStatus : lifecycleIntegrationStatus)(paths, { record: installed, env });
       checks.push({ name: `${name} integration`, ok: installed ? result.healthy : true, detail: !installed
-        ? `Not selected. Optional: sphinx install --agents ${name}.`
+        ? notSelected
         : !result.healthy ? `Integration is missing or changed. Run sphinx install --agents ${name}.`
           : name === 'pi' ? `${result.file}; native human dialogs configured. Run /reload in Pi; dialog support is required.`
             : `${result.file}; local browser questionnaires configured. macOS opens the page in the background; other environments show its local URL. Human answers stay in the questionnaire; terminal checks are explicit${name === 'cursor' ? '; local sessions only, not cloud agents' : '; OpenCode 1.x plugin'}.` });
@@ -458,10 +542,11 @@ export async function doctor({ env = process.env, cwd = process.cwd() } = {}) {
         present = !!installed.hooks && installedHookSpecs(installed).every(spec => hasHook(document, spec));
       } catch {}
     }
-    checks.push({ name: `${name} integration`, ok: installed ? present : true, detail: present
+    const moved = installed && await missingLaunchFile(installed.launch);
+    checks.push({ name: `${name} integration`, ok: installed ? present && !moved : true, detail: moved ? launchGone(moved) : present
       ? `${installed.file}; native questionnaire hooks configured${name === 'codex' ? '; review/trust in /hooks is required and cannot be verified by Sphinx' : '; start a new session to load changes'}`
       : installed ? `Native questionnaire hooks are missing, legacy, or changed. Run sphinx install --agents ${name}.`
-        : `Not selected. Optional: sphinx install --agents ${name}.` });
+        : notSelected });
     if (installed) {
       const mcpPresent = await inspectMcp(installed.mcp);
       checks.push({ name: `${name} questionnaire server`, ok: mcpPresent, detail: mcpPresent

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { mkdir, open, writeFile, rename, chmod, lstat, unlink } from 'node:fs/promises';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 // openai means any OpenAI chat-completions-compatible endpoint the user saves.
 export const PROVIDERS = Object.freeze(['openrouter', 'codex', 'claude', 'openai', 'auto']);
@@ -46,10 +47,24 @@ export function getPaths(env = process.env) {
   };
 }
 
+/**
+ * Open a file without following a symlink at its last component; a symlink fails with code ELOOP.
+ * Windows has no O_NOFOLLOW (`nofollow` is undefined there) and would follow the link, so lstat
+ * decides before the open instead. That check is not atomic with the open, but it stops a
+ * symlink a repository commits, which is the threat. A missing file is left to the open, which
+ * creates it for O_CREAT callers. Tests pass `{ nofollow: 0 }` to run the fallback on any platform.
+ */
+export async function openNoFollow(file, flags, mode, { nofollow = constants.O_NOFOLLOW } = {}) {
+  if (nofollow) return open(file, flags | nofollow, mode);
+  const info = await lstat(file).catch(error => { if (error.code !== 'ENOENT') throw error; });
+  if (info?.isSymbolicLink()) throw Object.assign(new Error(`Refusing to open a symlink: ${file}`), { code: 'ELOOP' });
+  return open(file, flags, mode);
+}
+
 export async function readJson(file, fallback) {
   let handle;
   try {
-    handle=await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+    handle=await openNoFollow(file, constants.O_RDONLY);
     const info=await handle.stat();
     if(!info.isFile() || info.size>4*1024*1024)throw new Error('not a regular JSON file or exceeds 4 MiB');
     const raw=await handle.readFile('utf8');
@@ -61,6 +76,27 @@ export async function readJson(file, fallback) {
   } finally { await handle?.close(); }
 }
 
+const RENAME_BUSY = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+/**
+ * Atomic saves rename a temporary file over the target. Windows refuses that while
+ * any other handle on the target is open, even a reader's: the questionnaire polls
+ * session files as the worker writes them, and antivirus or indexers hold fresh
+ * files. The refusal clears within moments, so on Windows retry it for about two
+ * seconds (waiting 10 ms, then 20 ms, and so on) and then give up with the last
+ * error. Other systems and other errors fail at once.
+ */
+export async function renameWithRetry(from, to, { signal, platform = process.platform, renameImpl = rename, attempts = 20 } = {}) {
+  for (let attempt = 1; ; attempt++) {
+    try { await renameImpl(from, to); return; } catch (error) {
+      if (platform !== 'win32' || !RENAME_BUSY.has(error?.code) || attempt >= attempts) throw error;
+      signal?.throwIfAborted();
+      // An abort during the wait rejects with the signal's reason, as throwIfAborted does, not the timer's generic AbortError.
+      await sleep(attempt * 10, undefined, { signal }).catch(error => { signal?.throwIfAborted(); throw error; });
+    }
+  }
+}
+
 export async function writeJson(file, value, { signal } = {}) {
   signal?.throwIfAborted();
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -68,7 +104,7 @@ export async function writeJson(file, value, { signal } = {}) {
   try {
     await writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: 'wx', signal });
     signal?.throwIfAborted();
-    await rename(tmp, file);
+    await renameWithRetry(tmp, file, { signal });
     await chmod(file, 0o600);
   } finally {
     await unlink(tmp).catch(error => { if (error.code !== 'ENOENT') throw error; });

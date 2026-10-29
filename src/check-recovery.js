@@ -16,7 +16,7 @@ export const switchChoices = (providers, from) => providers.filter(provider => p
 }));
 /** A coding-agent CLI that failed to run; another plan can take over. */
 export const isCliFailure = (error, route) => ['claude', 'codex'].includes(route?.provider)
-  && ['PROVIDER_FAILED', 'PROVIDER_NO_OUTPUT', 'PROVIDER_AUTH', 'EVALUATOR_TIMEOUT'].includes(error?.code);
+  && ['PROVIDER_START_FAILED', 'PROVIDER_FAILED', 'PROVIDER_NO_OUTPUT', 'PROVIDER_AUTH', 'EVALUATOR_TIMEOUT'].includes(error?.code);
 
 function retryable(error, before, state, minimum) {
   if (setupCodes.has(error.code) || setupTypes.has(error.errorType)) return false;
