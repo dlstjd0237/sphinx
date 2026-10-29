@@ -550,7 +550,7 @@ test('install preselects the system language only for a first setup', () => {
 test('languageQuestion offers English and Korean with the given default', async () => {
   assert.deepEqual(languageQuestion('ko'), {
     title: 'Which language should questionnaires use?',
-    description: 'Questions, feedback, and questionnaire screens use this language, including questions quoted in GitHub comments. Command output, Git hook messages, and Sphinx\'s own GitHub text stay in English. Change it later with sphinx config --language.',
+    description: 'Questions, feedback, and questionnaire screens use this language, including questions quoted in GitHub comments. Other command output, Git hook messages, and Sphinx\'s own GitHub text stay in English. Change it later with sphinx config --language.',
     current: 'ko',
     choices: [
       { value: 'en', label: 'English', description: 'Questions and questionnaire screens in English.' },
