@@ -371,7 +371,7 @@ test('the header and spinner fit the width with wide text', async t => {
     const korean = header(80, 'ko', { calibrating: false, accuracy: 80, streak: 3, recent: [true, false, true] });
     assert.equal(korean[2], '  billing → origin/main  ·  파일 2개  +10 −1  ·  Claude Code sonnet');
     assert.equal(korean[3], '  내 이해도  ●●●  80% · 3회 연속');
-    assert.equal(header(80, 'ko', { calibrating: true, answered: 2, needed: 3, recent: [true, false] })[3], '  내 이해도  ●●○○○  집계 중 · 3개 남음');
+    assert.equal(header(80, 'ko', { calibrating: true, answered: 2, needed: 3, recent: [true, false] })[3], '  내 이해도  ●●○○○  집계 중 · 답변 3개 더 필요');
     assert.equal(header(80, 'en', { calibrating: false, accuracy: 80, streak: 3, recent: [true, false, true] })[3], '  Your understanding  ●●●  80% · 3 in a row');
   });
 
