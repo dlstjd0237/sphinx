@@ -12,6 +12,7 @@ This page is the reference for reviewer models, usage limits, repository policy,
 - [Background preparation](#background-preparation)
 - [GitHub commit status and pull requests](#github-commit-status-and-pull-requests)
 - [Browser or terminal](#browser-or-terminal)
+- [Questionnaire language](#questionnaire-language)
 
 ## Settings locations
 
@@ -29,6 +30,8 @@ This page is the reference for reviewer models, usage limits, repository policy,
 `SPHINX_HOME` relocates all machine-wide settings, credentials, and assessment state. `sphinx config` shows effective settings and paths. A complete global example using the paid Haiku preset is in [examples/config.json](../examples/config.json).
 
 Model routes, credentials, and usage limits are machine-wide only. A repository cannot redirect review to another provider, supply credentials, or raise your limits.
+
+`SPHINX_SYSTEM_LANGUAGE` (`en` or `ko`) overrides the system language that `sphinx install` uses when it creates a new configuration. Use it in automation and tests.
 
 ## Reviewer models
 
@@ -305,3 +308,17 @@ The workflow pins the Action to a Sphinx release tag (`parthh01/sphinx/action@v0
 | `browser` | Always the browser (on Linux and over SSH, open the printed local URL) |
 
 Inline questions need a terminal a person is looking at. When Git runs from a coding agent's shell there isn't one, so Sphinx opens a terminal window on a desktop instead, and falls back to the browser when it can't do either. `interface` is a personal setting; it can't be set in `.sphinxconfig` and doesn't change what a check asks.
+
+## Questionnaire language
+
+`language` in `config.json` sets the language of your questionnaires: `en` (default) or `ko`. It is a personal setting, so a repository's `.sphinxconfig` can't set it. It is not part of the check policy, so changing it never invalidates a prepared check, a pass, or a waiting Git operation.
+
+**Changing it.** Use the language chip on the questionnaire page, which saves the setting right away, or run `sphinx config --language ko` (or `en`). Guided `sphinx install` asks about it first and preselects your system language on a first setup, or your current setting after that. `sphinx install --language ko` skips the question. `sphinx install --yes` saves your system language only when it creates a new configuration.
+
+**What it covers.** The text the reviewer and grader write for you: questions, feedback, explanations, follow-up questions, and the reason no questions were needed. The questionnaire screens follow it too: the browser page, the terminal questionnaire, the terminal window Sphinx opens when Git runs from a coding agent's shell, the Codex and Claude Code fallback form, and Pi's dialogs. The reviewer is told to keep code identifiers, file paths, and Git terms such as push and commit as written, and the grader to judge a Korean answer by its meaning. The fallback form's action values (`answer`, `learn`, `dispute`, `pause`) stay English, and its text explains them.
+
+**What stays English.** The output of other commands, such as `install`, `config`, `doctor`, `status`, `help`, `pending`, and `uninstall`. So do Git hook messages (the `Sphinx: …` lines), the Pi notice after a fallback check, Sphinx's own text on GitHub, Sphinx's sentences in `--json` output, and these docs.
+
+**On GitHub.** The pull request comment quotes each question, and the reason no questions were needed, in the language it was written in. Korean questions therefore appear on the pull request whenever a comment is posted (see [GitHub commit status and pull requests](#github-commit-status-and-pull-requests)). The commit status is a fixed English phrase (for example, a count of questions, or that the check was skipped). `github.answers` only decides whether your answers are added to the comment.
+
+**Limits.** Questions already prepared in the background keep the language they were prepared in. A review or grading that is already running when you switch finishes in the earlier language. Text the model has already written is not translated. The reviewer or grader may occasionally write English anyway; Sphinx does not treat that as an error.

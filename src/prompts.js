@@ -2,26 +2,30 @@ import { parseRoute, questionLimit } from './routing.js';
 import { reviewerTurnLimit } from './reviewer-limits.js';
 import { REVIEWER_PRESETS, presetOptions } from './model-presets.js';
 import { DISTANCES } from './config.js';
+import { localize, systemLanguage, t } from './i18n.js';
 
 export const routeText = route => `${route.provider}${route.model ? `:${route.model}` : ''}`;
 export const splitList = value => String(value).split(',').map(item => item.trim()).filter(Boolean);
 export const questionCapsText = level => ['small', 'medium', 'large'].map(tier => `${tier} ${questionLimit(level, tier)}`).join(', ');
 export const reviewCapsText = config => ['small', 'medium', 'large'].map(tier => `${tier} ${Math.min(config.agentMaxTurns ?? 8, reviewerTurnLimit(tier, config.agentMaxTurns ?? 8) + 2)}`).join(', ');
 
-export function createPrompts({ ask, ui, select }) {
-  async function choose({ title, description, choices, current, requireSelection = false }) {
+// language draws a menu in the questionnaire language: the message refs it carries (the review recovery menu) and the
+// menu's own words. Install and init pass none, so their menus stay English.
+export function createPrompts({ ask, ui, select, language = 'en' }) {
+  async function choose(prompt) {
+    const { title, description, choices, current, requireSelection = false } = localize(prompt, language);
     ui.section(title); if (description) ui.paragraph(description);
     const selected = requireSelection ? -1 : Math.max(0, choices.findIndex(choice => choice.value === current));
     ui.blank();
-    ui.rows(choices.map((choice, index) => [`${index + 1}. ${choice.label}${index === selected ? ' (default)' : ''}`, choice.description]));
+    ui.rows(choices.map((choice, index) => [`${index + 1}. ${index === selected ? t(language, 'terminal.choose.defaultLabel', { label: choice.label }) : choice.label}`, choice.description]));
     for (;;) {
-      const answer = (await ask(selected < 0 ? '\nChoose: ' : `\nChoose [${selected + 1}]: `)).trim();
+      const answer = (await ask(`\n${selected < 0 ? t(language, 'terminal.choose.prompt') : t(language, 'terminal.choose.promptDefault', { number: selected + 1 })} `)).trim();
       if (!answer && selected >= 0) return choices[selected].value;
       const exact = choices.find(choice => choice.value.toLowerCase() === answer.toLowerCase());
       const number = /^\d+$/.test(answer) ? Number(answer) : 0;
       if (exact) return exact.value;
       if (number >= 1 && number <= choices.length) return choices[number - 1].value;
-      ui.warning(`Enter a number from 1 to ${choices.length}${selected < 0 ? '.' : `, or press Enter for ${choices[selected].label}.`}`);
+      ui.warning(selected < 0 ? t(language, 'terminal.choose.invalid', { max: choices.length }) : t(language, 'terminal.choose.invalidDefault', { max: choices.length, label: choices[selected].label }));
     }
   }
   async function text({ title, description, current, validate = value => value }) {
@@ -62,6 +66,24 @@ export function createPrompts({ ask, ui, select }) {
     }
   }
   return { choose, text, multiselect };
+}
+
+/** The questionnaire language install preselects: the saved one on a rerun, the system language on a first setup. */
+export function installLanguage({ hasExistingConfig, current, system = systemLanguage() }) {
+  return hasExistingConfig ? current.language : system;
+}
+
+// Install output stays English; only the choice labels name each language in itself.
+export function languageQuestion(current) {
+  return {
+    title: 'Which language should questionnaires use?',
+    description: 'Questions, feedback, and questionnaire screens use this language, including questions quoted in GitHub comments. Other command output, Git hook messages, and Sphinx\'s own GitHub text stay in English. Change it later with sphinx config --language.',
+    current,
+    choices: [
+      { value: 'en', label: 'English', description: 'Questions and questionnaire screens in English.' },
+      { value: 'ko', label: '한국어 (Korean)', description: 'Questions and questionnaire screens in Korean. Code, file paths, and Git terms stay as they are.' },
+    ],
+  };
 }
 
 const lists = value => { if (!splitList(value).length) throw new Error('Enter at least one comma-separated value.'); if (/\s/.test(splitList(value).join(''))) throw new Error('Use commas between patterns; patterns cannot contain spaces.'); };

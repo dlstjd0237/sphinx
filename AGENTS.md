@@ -13,5 +13,6 @@ Sphinx helps developers retain understanding of agent-assisted changes. Keep ass
 - Do not install into a developer's real home or change global Git config during tests. Use temporary directories and explicit test environments.
 - Use node:test for meaningful behavior and real temporary Git repositories for Git integration tests.
 - Build a clear, polished terminal interface with explanatory options, restrained colors, and an ASCII sphinx. The user explicitly requested this visual direction. Keep JSON and hook protocol output machine-readable; honor NO_COLOR, non-TTY output, and narrow terminals.
+- Questionnaire copy lives in two catalogs, `src/i18n.js` (EN) and `src/i18n-ko.js` (KO). Edit both together: `test/i18n.test.js` fails when their keys or placeholders differ.
 
 Run `npm test` before finishing changes.

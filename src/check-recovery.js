@@ -1,5 +1,6 @@
 import { questionLimit } from './routing.js';
-import { modelUsageText } from './usage.js';
+import { modelUsageRef } from './usage.js';
+import { join, msg } from './i18n.js';
 
 const setupCodes = new Set(['INVALID_CONFIG', 'INVALID_SNAPSHOT', 'STALE_SNAPSHOT', 'CONTEXT_LIMIT', 'TOOL_RESULT_LIMIT', 'OUTPUT_LIMIT', 'PROVIDER_NOT_FOUND', 'PROVIDER_START_FAILED', 'PROVIDER_FAILED']);
 const setupTypes = new Set(['authentication', 'permission_denied', 'payment_required', 'context_length_exceeded', 'max_tokens_exceeded', 'token_limit_exceeded', 'string_too_long', 'invalid_request', 'invalid_prompt', 'not_found', 'precondition_failed', 'payload_too_large', 'unprocessable', 'content_policy_violation', 'refusal']);
@@ -9,10 +10,12 @@ export const isRateLimit = (error, route) => ['openrouter', 'openai'].includes(r
   && (error?.status === 429 || error?.errorType === 'rate_limit_exceeded');
 
 export const PLAN_NAMES = { claude: ['Claude Code', 'Claude'], codex: ['Codex', 'ChatGPT'] };
-const ROUTE_NAMES = { openrouter: 'OpenRouter', openai: 'your API endpoint', claude: 'Claude Code', codex: 'Codex' };
+// Product names stay as they are; an API endpoint is described in the questionnaire's language.
+const ROUTE_NAMES = { openrouter: 'OpenRouter', claude: 'Claude Code', codex: 'Codex' };
+// The menu's text is message refs: the page and the terminal each draw them in the questionnaire language.
 export const switchChoices = (providers, from) => providers.filter(provider => provider !== from).map(provider => ({
-  value: `switch-${provider}`, label: `Switch this check to ${PLAN_NAMES[provider][0]}`,
-  description: `Continue on your signed-in ${PLAN_NAMES[provider][1]} plan instead of ${ROUTE_NAMES[from] ?? from}. Only this check changes; your saved model settings stay the same.`,
+  value: `switch-${provider}`, label: msg('common.recovery.switchLabel', { plan: PLAN_NAMES[provider][0] }),
+  description: msg('common.recovery.switchDescription', { plan: PLAN_NAMES[provider][1], route: from === 'openai' ? msg('common.recovery.routeEndpoint') : ROUTE_NAMES[from] ?? from }),
 }));
 /** A coding-agent CLI that failed to run; another plan can take over. */
 export const isCliFailure = (error, route) => ['claude', 'codex'].includes(route?.provider)
@@ -66,39 +69,38 @@ export async function prepareInteractiveCheck({ start, inspect, authorizeMore, v
       const unlimited = state.usage.limit === null;
       const remaining = unlimited ? Infinity : state.usage.limit - state.usage.calls;
       const choices = [];
+      // The provider's own diagnostic stays a plain string; Sphinx's sentences are refs.
       ui.warning(diagnostic(error, state));
-      ui.note(`Used so far: ${modelUsageText(state.usage, state.tokens)}. No questions or approval were recorded.`);
+      ui.note(msg('common.recovery.usedSoFar', { usage: modelUsageRef(state.usage, state.tokens) }));
       if (retryable(error, before, state, minimum)) {
         if (remaining >= minimum) choices.push({
-          value: 'retry', label: state.preparation.resumable ? 'Continue the saved review' : unlimited ? 'Retry the review' : 'Retry within the remaining allowance',
-          description: `${unlimited ? 'All usage so far is kept.' : `${remaining} calls remain, including ${reserve} reserved for grading.`} ${state.preparation.resumable ? 'Reuse the evidence and investigation already saved.' : 'Keep the same evaluator route and spending settings.'}`,
+          value: 'retry', label: msg(state.preparation.resumable ? 'common.recovery.continueSaved' : unlimited ? 'common.recovery.retry' : 'common.recovery.retryWithin'),
+          description: join([unlimited ? msg('common.recovery.usageKept') : msg('common.recovery.callsRemain', { remaining, reserve }), msg(state.preparation.resumable ? 'common.recovery.reuseSaved' : 'common.recovery.keepRoute')], ' '),
         });
         else if (config.maxModelCalls >= minimum) choices.push({
-          value: 'extend', label: `Allow up to ${config.maxModelCalls} more calls and retry`,
-          description: `${remaining} calls remain; review needs at least ${reviewMinimum} plus ${reserve} reserved for grading. Keep all ${state.usage.calls} used calls counted and record this new allowance.`,
+          value: 'extend', label: msg('common.recovery.extendLabel', { calls: config.maxModelCalls }),
+          description: msg('common.recovery.extendDescription', { remaining, minimum: reviewMinimum, reserve, used: state.usage.calls }),
         });
       }
       // Offer the user's own coding-agent plan first when an API route is rate limited.
       const switches = switchRoute && (isRateLimit(error, state.route) || isCliFailure(error, state.route)) ? switchChoices(planProviders, state.route.provider) : [];
       choices.unshift(...switches);
-      if (!choices.length) ui.note('Resolve the reported setup or evidence problem before resuming. Repeating this attempt is not offered here.');
+      if (!choices.length) ui.note(msg('common.recovery.noRetry'));
       const failedCli = isCliFailure(error, state.route) ? PLAN_NAMES[state.route.provider][0] : null;
-      choices.push({ value: 'pause', label: 'Pause this check', description: 'Save progress without making another model request. The Git operation remains unapproved.' });
+      choices.push({ value: 'pause', label: msg('common.recovery.pauseLabel'), description: msg('common.recovery.pauseDescription') });
       const action = await choose({
         // Lead with the cause when it is a rate limit, so the choices make sense.
-        title: isRateLimit(error, state.route) ? `${state.route.provider === 'openai' ? 'Your API endpoint' : 'OpenRouter'} is rate limiting this review`
-          : failedCli ? `${failedCli} could not run this review` : 'Review did not finish',
+        title: isRateLimit(error, state.route) ? msg(state.route.provider === 'openai' ? 'common.recovery.rateLimitedEndpoint' : 'common.recovery.rateLimitedOpenRouter')
+          : failedCli ? msg('common.recovery.cliFailedTitle', { cli: failedCli }) : msg('common.recovery.reviewFailedTitle'),
         description: isRateLimit(error, state.route)
-          ? `It returned too many requests (HTTP 429). ${switches.length ? 'Switch this check to your coding plan, or wait and continue.' : 'Wait a moment, then continue.'}`
-          : failedCli ? `${switches.length ? `Switch this check to ${PLAN_NAMES[switches[0].value.slice(7)][0]}, or pause and` : 'Pause and'} check that ${failedCli} is installed, signed in, and up to date. The details are below.`
-          : waitingGit
-          ? 'The original Git operation is waiting while this terminal stays open, subject to its time limit. Choose how to continue.'
-          : 'Choose how to continue. Nothing is retried automatically.',
+          ? msg(switches.length ? 'common.recovery.rateLimitedSwitch' : 'common.recovery.rateLimitedWait')
+          : failedCli ? (switches.length ? msg('common.recovery.cliFailedSwitch', { plan: PLAN_NAMES[switches[0].value.slice(7)][0], cli: failedCli }) : msg('common.recovery.cliFailedPause', { cli: failedCli }))
+          : msg(waitingGit ? 'common.recovery.waitingGit' : 'common.recovery.chooseHow'),
         choices, current: 'pause',
       });
       signal?.throwIfAborted();
       if (action === 'pause') {
-        ui.note('Progress saved. No approval was recorded.');
+        ui.note(msg('common.recovery.pausedNote'));
         ui.command(`sphinx check --id ${state.id}`);
         return null;
       }
@@ -109,13 +111,13 @@ export async function prepareInteractiveCheck({ start, inspect, authorizeMore, v
         const provider = action.slice('switch-'.length);
         await switchRoute(provider);
         signal?.throwIfAborted();
-        ui.note(`Switched this check to ${PLAN_NAMES[provider][0]}. Your saved model settings are unchanged.`);
+        ui.note(msg('common.recovery.switchedNote', { plan: PLAN_NAMES[provider][0] }));
         continue;
       }
       if (action === 'extend') {
         await authorizeMore();
         signal?.throwIfAborted();
-        ui.note(`Authorized up to ${config.maxModelCalls} additional model calls, including grading. Earlier usage remains counted.`);
+        ui.note(msg('common.recovery.authorizedNote', { calls: config.maxModelCalls }));
       }
       // The next start still performs the store's locked policy/snapshot and
       // budget checks. A new failure always returns to the human, never a retry loop.

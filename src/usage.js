@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { getPaths } from './config.js';
+import { join, localize, msg } from './i18n.js';
 
 // Transports report token usage into whichever assessment is running, without
 // threading a callback through every reviewer and grading layer.
@@ -105,12 +106,14 @@ export function addUsage(total = {}, usage) {
 
 export const compact = n => n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n);
 export const money = cost => cost === 0 ? '$0' : cost < 0.0001 ? '<$0.0001' : cost < 0.01 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(2)}`;
-/** Tokens and running cost; a configured call cap is shown only when one is set. */
-export const modelUsageText = ({ calls, limit } = {}, tokens = {}) => [
-  `${compact(count(tokens?.input) + count(tokens?.output))} tokens`,
+/** Tokens and running cost; a configured call cap is shown only when one is set. A message ref, for the questionnaire's screens. */
+export const modelUsageRef = ({ calls, limit } = {}, tokens = {}) => join([
+  msg('common.usage.tokens', { n: compact(count(tokens?.input) + count(tokens?.output)) }),
   ...(Number.isFinite(tokens?.cost) ? [money(tokens.cost)] : []),
-  ...(limit !== null && limit !== undefined ? [`${calls}/${limit} calls`] : []),
-].join(' · ');
+  ...(limit !== null && limit !== undefined ? [msg('common.usage.calls', { calls, limit })] : []),
+], ' · ');
+/** The same line in English, for command output such as sphinx pending. */
+export const modelUsageText = (usage, tokens) => localize(modelUsageRef(usage, tokens), 'en');
 
 export const modelLimitText = limit => limit === null ? 'no limit' : `${limit} model calls per assessment`;
 

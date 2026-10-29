@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { isNewer, latestVersion, scheduleUpdate, updatePlan } from '../src/update.js';
+import { localize } from '../src/i18n.js';
 
 async function home(t) {
   const dir = await mkdtemp(path.join(tmpdir(), 'sphinx-update-'));
@@ -40,7 +41,7 @@ test('updates with the package manager that installed it, and never touches a li
   const checkout = path.join(dir, 'sphinx'), link = path.join(dir, 'lib/node_modules/linked');
   await mkdir(checkout); await symlink(checkout, link);
   const linked = await updatePlan({ root: link });
-  assert.equal(linked.manager, null); assert.match(linked.note, /git pull/);
+  assert.equal(linked.manager, null); assert.match(localize(linked.note, 'en'), /git pull/);
 });
 
 test('the install waits for this process to exit and runs detached', async t => {

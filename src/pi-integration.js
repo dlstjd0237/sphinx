@@ -3,13 +3,12 @@ import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, rename, rm, writeFile } from 'node:fs/promises';
+import { t } from './i18n.js';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const MODULE_PATH = fileURLToPath(import.meta.url);
-const ACTIONS = new Map([
-  ['Answer', 'answer'], ['Learn, then try a new scenario', 'learn'],
-  ['Dispute this question', 'dispute'], ['Pause', 'pause'],
-]);
+// Each action's dialog label; elicitPiForm draws them in the form's language.
+const ACTION_LABELS = { answer: 'form.pi.answer', learn: 'form.pi.learn', dispute: 'form.pi.dispute', pause: 'form.pi.pause' };
 const checkpoint = async options => (await import('./native-check.js')).runNativeCheckpoint(options);
 export const PI_GUIDANCE = [
   'Sphinx Git hooks serve a local browser questionnaire for blocking checkpoints and keep the original Git operation waiting. That same operation continues after verified completion. Native Pi dialogs are fallback checks; they do not resume an exited process.',
@@ -28,14 +27,17 @@ function outcomeText(status) {
 /** Native Pi dialogs are human input, never a model-callable answering tool. */
 export async function elicitPiForm(ctx, form, signal) {
   signal?.throwIfAborted();
-  const selected = await ctx.ui.select(form.message, [...ACTIONS.keys()], { signal });
+  // Per call: the labels in the form's language, mapped back to actions. A form without a language keeps English.
+  const language = form.language ?? 'en';
+  const actions = new Map(Object.entries(ACTION_LABELS).map(([action, key]) => [t(language, key), action]));
+  const selected = await ctx.ui.select(form.message, [...actions.keys()], { signal });
   signal?.throwIfAborted();
-  const action = ACTIONS.get(selected);
+  const action = actions.get(selected);
   if (!action) return { action: 'cancel' };
   if (action === 'learn' || action === 'pause') return { action: 'accept', content: { action } };
   const response = await ctx.ui.input(
-    `${form.message}\n\n${action === 'dispute' ? 'Why is this question ambiguous or incorrect?' : 'Your prediction and short reason'}`,
-    'Up to 8,000 characters. Escape pauses the checkpoint.', { signal },
+    `${form.message}\n\n${t(language, action === 'dispute' ? 'form.pi.disputePrompt' : 'form.pi.answerPrompt')}`,
+    t(language, 'form.pi.inputHint'), { signal },
   );
   signal?.throwIfAborted();
   return response === undefined ? { action: 'cancel' } : { action: 'accept', content: { action, response } };

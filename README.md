@@ -47,7 +47,7 @@ npm install -g sphinx-understand
 sphinx install
 ```
 
-Guided setup asks which coding agents you use and which reviewer to use. It suggests Haiku through Claude Code or GPT-6 Luna through Codex. If you choose OpenRouter, it asks for an API key. It then offers the recommended checkpoints (pushes to `main` or `master` at standard depth) or **Customize** to pick events, branches, remotes, and depth. To install without prompts:
+Guided setup first asks which language questionnaires use, English or Korean. A Korean system preselects Korean on a first setup. It then asks which coding agents you use and which reviewer to use. It suggests Haiku through Claude Code or GPT-6 Luna through Codex. If you choose OpenRouter, it asks for an API key. It then offers the recommended checkpoints (pushes to `main` or `master` at standard depth) or **Customize** to pick events, branches, remotes, and depth. To install without prompts:
 
 ```sh
 sphinx install --yes --preset claude-economy --agents claude
@@ -287,6 +287,7 @@ These live in `config.json`, and most can be set with `sphinx config`:
 | --- | --- | --- |
 | `models` | `--preset`, `--small`, `--medium`, `--large` | The reviewer for each change size |
 | `interface` | `--interface` | Where questions appear. `auto` (default): the browser on a local Mac or on Windows, otherwise the terminal you pushed from. Or `browser` / `terminal` |
+| `language` | `--language` | The language of questions, feedback, and questionnaire screens: `en` (default) or `ko`. The questionnaire's language chip changes it too. Other command output and Git hook messages stay English |
 | `maxModelCalls` | `--max-model-calls` | Optional cap on model requests per check (1–100, or `unlimited`, the default) |
 | `maxOutputTokens` | `--max-output-tokens` | Output allowance per request, including reasoning (default 4096) |
 | `allowPaid` | `--allow-paid` | Lets OpenRouter use paid models |

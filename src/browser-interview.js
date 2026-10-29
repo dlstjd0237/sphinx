@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { DISTANCES, loadConfig, policyHash, readJson, repositoryConfigInfo, saveConfig } from './config.js';
 import { revalidateSnapshot, repositoryName } from './git.js';
-import { createSessionStore, savedDraft } from './sessions.js';
+import { createSessionStore, fallbackText, savedDraft } from './sessions.js';
 import { prepareInteractiveCheck, isRateLimit, isCliFailure, switchChoices, PLAN_NAMES } from './check-recovery.js';
 import { claimCheckpointDialog, finishCheckpointDialog, waitForCheckpointTerminal } from './terminal-launch.js';
 import { browserPage } from './browser-page.js';
@@ -21,15 +21,32 @@ import { pullRequestPush, usesSphinxAction } from './github.js';
 import { SESSION_ENV } from './activation.js';
 import { envValue, withoutAddedCwdBlock } from './windows.js';
 import { stderrLine } from './terminal.js';
+import { LANGUAGES, join, localize, msg, t } from './i18n.js';
 
 const ID = /^[a-f0-9]{64}$/u;
 const cancelled = () => Object.assign(new Error('Check paused. Progress is saved.'), { code: 'SPHINX_CANCELLED' });
 const equal = (a, b) => typeof a === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 const offLimits = env => env.SPHINX_EVALUATOR === '1' || (env.CI && !['false', '0'].includes(env.CI));
-// A waiting Git operation in the page's words, as its scope line names it.
-const words = event => event === 'pre-commit' ? ['commit', 'Commit'] : ['push', 'Push'];
-// What a pass that did not go through still does: the Git gate holds it until Continue.
-const keptPass = op => `Your pass is saved, so the next ${op} of this change asks only whether to continue.`;
+// The waiting Git operation, as the hook's own (English) lines name it.
+const operation = event => event === 'pre-commit' ? 'commit' : 'push';
+// Sphinx's sentences that name the waiting operation, one catalog key per operation: keys are never built at runtime.
+// A sentence holds its varying parts as {placeholders}, so each language orders them its own way. keptPass is what a
+// pass that did not go through still does: the Git gate holds it until Continue.
+const OPERATION_KEYS = {
+  push: {
+    keptPass: 'server.keptPass.push', cutShort: 'server.paused.cutShortPush', gitStopped: 'server.paused.gitStoppedPush', chooseConsent: 'server.http.chooseConsentPush',
+    passedEarlier: 'server.earlier.passedPush', noQuestionsEarlier: 'server.earlier.noQuestionsPush', notify: 'server.notify.continuePush', question: 'server.consent.questionPush',
+    proceed: 'server.consent.continuePush', proceedDescription: 'server.consent.continueDescriptionPush', stop: 'server.consent.stopPush', stopped: 'server.stopped.push',
+    nextDestination: 'server.passed.nextDestinationPush', gitFinishing: 'server.passed.gitFinishingPush',
+  },
+  commit: {
+    keptPass: 'server.keptPass.commit', cutShort: 'server.paused.cutShortCommit', gitStopped: 'server.paused.gitStoppedCommit', chooseConsent: 'server.http.chooseConsentCommit',
+    passedEarlier: 'server.earlier.passedCommit', noQuestionsEarlier: 'server.earlier.noQuestionsCommit', notify: 'server.notify.continueCommit', question: 'server.consent.questionCommit',
+    proceed: 'server.consent.continueCommit', proceedDescription: 'server.consent.continueDescriptionCommit', stop: 'server.consent.stopCommit', stopped: 'server.stopped.commit',
+    nextDestination: 'server.passed.nextDestinationCommit', gitFinishing: 'server.passed.gitFinishingCommit',
+  },
+};
+const operationKeys = event => OPERATION_KEYS[operation(event)];
 
 /**
  * A quiet macOS notification that questions (or the Continue choice) are waiting.
@@ -104,7 +121,8 @@ function publicFields(state) {
     ...(state.question ? { question: { id: state.question.id, prompt: state.question.prompt, choices: state.question.choices || [] } } : {}),
     // A pass held from an earlier operation shows no question, so its last grade's feedback would read
     // out of context. A pass made on this page is held too, but its transcript already shows that feedback.
-    ...(state.feedback && !state.held ? { feedback: state.feedback } : {}),
+    // A stored state has no feedbackCode, and its feedback passes through as it is.
+    ...(state.feedback && !state.held ? { feedback: fallbackText(state.feedbackCode, state.feedback) } : {}),
   };
 }
 
@@ -129,11 +147,17 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
   // Cut short at the consent step (only Git or the deadline can), the pass is already saved.
   let resumeCommand = null;
   const pauseMessage = () => {
-    const [op, Op] = words(state.event);
-    if (!waitingGit) return 'Paused. Your progress is saved. To continue, run the command below; Sphinx reopens at this question.';
-    return state.phase === 'consent' ? `Git stopped waiting before you chose, so the ${op} did not go through. ${keptPass(op)}` : `${Op} stopped. It did not go through, and your progress is saved. To continue, run the same ${op} again; Sphinx reopens at this question.`;
+    const keys = operationKeys(state.event);
+    if (!waitingGit) return msg('server.paused.manual');
+    return state.phase === 'consent' ? msg(keys.cutShort, { keptPass: msg(keys.keptPass) }) : msg(keys.gitStopped);
   };
-  let state = { phase: 'waiting', operationClosed: false, revision: randomUUID(), sequence, message: 'Waiting for the checkpoint.', messages: [] };
+  // The questionnaire language: what each check's settings say, until the page picks one, which then holds for
+  // every check this server shows. activeConfig is the running check's settings, so a pick reaches its next model call.
+  let language = 'en', languageChoice = null, activeConfig = null;
+  // The state keeps Sphinx's own sentences as message refs. Every exit draws them in the current language; nothing
+  // drawn is ever stored back.
+  let state = { phase: 'waiting', operationClosed: false, revision: randomUUID(), sequence, message: msg('server.state.waiting'), messages: [] };
+  const outbound = () => ({ ...localize(state, language), language });
   // The chat transcript for the current checkpoint lives only in this process.
   // It contains public questions, feedback, and the human's own text.
   let transcript = [], turns = 0, score = null;
@@ -148,6 +172,14 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
   // Distance is part of the check's policy, so it is written only when this check ends.
   let distance = null;
   const afterClose = [];
+  // This server's edits to the global settings (the language, the default model) run one after another, so neither
+  // drops a key the other wrote. A failed edit does not stop the next one; its caller still gets the error.
+  let configWrites = Promise.resolve();
+  const writeGlobal = change => {
+    const run = configWrites.then(() => loadConfig(undefined, env)).then(saved => saveConfig(change(saved), env));
+    configWrites = run.catch(() => {});
+    return run;
+  };
   // Whether to post the Sphinx stamp to the pull request, per checkpoint; read by the Git hook after a pass.
   let stamp = null; const stampChoices = new Map();
   // The repository's understanding score, refreshed after every graded answer.
@@ -182,7 +214,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
   // never turn an answer already in flight into a stale submission.
   const publish = (next, { display = false } = {}) => {
     state = { ...next, messages: transcript, ...(score ? { score } : {}), ...(update ? { update } : {}), ...(repoName ? { repoName } : {}), ...(models ? { models: { groups: models.groups, reviewing: !!reviewAttempt, busy: grading } } : {}), ...(distance ? { distance: { current: distance.current, next: distance.next, scope: distance.scope } } : {}), ...(stamp ? { stamp } : {}), change: viewState(), evidence: evidence && evidence.checkpoint === next.id ? { questionId: evidence.questionId, refs: evidence.refs } : undefined, waitingGit, abandonAfterMs, operationClosed: closed, revision: display ? next.revision : randomUUID(), sequence: ++sequence };
-    const event = `data: ${JSON.stringify(state)}\n\n`;
+    const event = `data: ${JSON.stringify(outbound())}\n\n`;
     for (const stream of streams) writeEvent(stream, event);
   };
   // `watch` polls for work done outside this page; a truthy result ends the wait as { action: 'saved' }.
@@ -207,61 +239,78 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
     'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
     'Content-Security-Policy': `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
   };
+  // Every reply draws its message refs (errors, the state, an update note) in the language current as it is sent.
+  // ponytail: diffs and change summaries (up to 3000 rows) are walked too, for nothing; skip them if a profile ever says so.
   const send = (res, status, value) => {
     if (res.destroyed || res.writableEnded) return;
-    res.writeHead(status, { ...headers, 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value));
+    res.writeHead(status, { ...headers, 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(localize(value, language)));
   };
   async function handle(req, res) {
-    if (req.headers.host !== new URL(origin).host || (req.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(req.headers['sec-fetch-site']))) return send(res, 403, { error: 'Forbidden request.' });
+    if (req.headers.host !== new URL(origin).host || (req.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(req.headers['sec-fetch-site']))) return send(res, 403, { error: msg('server.http.forbidden') });
     const route = req.url?.split('?')[0];
     const segments = route?.split('/') || [];
-    if (!equal(segments[1], token) || segments.length > 3 || (segments[2] && !['state', 'events', 'action', 'change', 'diff'].includes(segments[2]))) return send(res, 404, { error: 'Not found.' });
+    if (!equal(segments[1], token) || segments.length > 3 || (segments[2] && !['state', 'events', 'action', 'change', 'diff'].includes(segments[2]))) return send(res, 404, { error: msg('server.http.notFound') });
     if (req.method === 'GET' && !segments[2]) {
-      res.writeHead(200, { ...headers, 'Content-Type': 'text/html; charset=utf-8' }); res.end(browserPage({ token, nonce })); return;
+      res.writeHead(200, { ...headers, 'Content-Type': 'text/html; charset=utf-8' }); res.end(browserPage({ token, nonce, language })); return;
     }
-    if (req.method === 'GET' && segments[2] === 'state') return send(res, 200, state);
+    if (req.method === 'GET' && segments[2] === 'state') return send(res, 200, outbound());
     if (req.method === 'GET' && ['change', 'diff'].includes(segments[2])) {
       const query = new URL(req.url, origin).searchParams, current = view;
-      if (!current || query.get('id') !== current.id || state.id !== current.id) return send(res, 409, { error: 'This checkpoint changed. Reload the current change.' });
+      if (!current || query.get('id') !== current.id || state.id !== current.id) return send(res, 409, { error: msg('server.http.changeStale') });
       if (current.status !== 'ready') return send(res, current.status === 'loading' ? 202 : 200, viewState());
-      try { await current.check(); } catch { return send(res, 409, { error: 'The code or settings changed. This view no longer describes the checkpoint.' }); }
+      try { await current.check(); } catch { return send(res, 409, { error: msg('server.http.viewStale') }); }
       if (segments[2] === 'change') return send(res, 200, { status: 'ready', id: current.id, ...current.model.summary() });
       try { return send(res, 200, await current.model.diff(query.get('path') ?? '', { context: query.get('context') ?? '3' })); }
-      catch (error) { return send(res, 404, { error: error.code === 'CHANGE_VIEW_UNAVAILABLE' ? error.message : 'This file diff is unavailable.' }); }
+      catch (error) { return send(res, 404, { error: error.code === 'CHANGE_VIEW_UNAVAILABLE' ? (error.ref ?? error.message) : msg('server.http.diffUnavailable') }); }
     }
     if (req.method === 'GET' && segments[2] === 'events') {
-      if (streams.size >= 8) return send(res, 429, { error: 'Too many open questionnaire pages.' });
+      if (streams.size >= 8) return send(res, 429, { error: msg('server.http.tooManyPages') });
       res.writeHead(200, { ...headers, 'Content-Type': 'text/event-stream; charset=utf-8', Connection: 'keep-alive' });
-      streams.add(res); writeEvent(res, `data: ${JSON.stringify(state)}\n\n`);
+      streams.add(res); writeEvent(res, `data: ${JSON.stringify(outbound())}\n\n`);
       const heartbeat = setInterval(() => writeEvent(res, ': keep-alive\n\n'), 10000); heartbeat.unref();
       res.once('close', () => { clearInterval(heartbeat); streams.delete(res); }); return;
     }
-    if (req.method !== 'POST' || segments[2] !== 'action') return send(res, 405, { error: 'Unsupported method.' });
-    if (req.headers.origin !== origin || !equal(req.headers['x-sphinx-token'], token) || req.headers['content-type']?.split(';')[0] !== 'application/json') return send(res, 403, { error: 'Forbidden request.' });
+    if (req.method !== 'POST' || segments[2] !== 'action') return send(res, 405, { error: msg('server.http.unsupportedMethod') });
+    if (req.headers.origin !== origin || !equal(req.headers['x-sphinx-token'], token) || req.headers['content-type']?.split(';')[0] !== 'application/json') return send(res, 403, { error: msg('server.http.forbidden') });
+    if (new URL(req.url, origin).searchParams.get('language') === '1') {
+      const picked = await readBody(req, 256).then(text => JSON.parse(text)?.language).catch(() => undefined);
+      // Checked after the body arrives, with no wait between here and the save below: a pick either joins the saves
+      // close() waits for, or is refused.
+      if (closed) return send(res, 409, { error: msg('server.language.closing') });
+      if (!LANGUAGES.includes(picked)) return send(res, 400, { error: msg('server.language.invalid') });
+      // Language is display, not policy: it changes at any step and keeps the revision. It applies before the save,
+      // so frames sent meanwhile use it, and to the running check's next model call; a call already running keeps its own.
+      languageChoice = language = picked;
+      if (activeConfig) activeConfig.language = picked;
+      const failure = await writeGlobal(saved => ({ ...saved, language: picked })).then(() => null, error => error);
+      publish(state, { display: true });
+      // A failed save keeps the choice for this operation and never touches the state's error, which may be a question's.
+      return send(res, 200, { ...outbound(), ...(failure ? { languageError: t(language, 'server.language.saveFailed', { reason: failure.message }) } : {}) });
+    }
     if (new URL(req.url, origin).searchParams.get('stamp') === '1') {
-      let post; try { post = JSON.parse(await readBody(req, 256))?.post; } catch { return send(res, 400, { error: 'Invalid choice.' }); }
-      if (!stamp || typeof post !== 'boolean') return send(res, 409, { error: 'There is no pull request stamp to set for this check.' });
+      let post; try { post = JSON.parse(await readBody(req, 256))?.post; } catch { return send(res, 400, { error: msg('server.http.invalidChoice') }); }
+      if (!stamp || typeof post !== 'boolean') return send(res, 409, { error: msg('server.http.noStamp') });
       stamp = { ...stamp, post }; stampChoices.set(state.id, post);
       publish(state, { display: true });
       return send(res, 200, { stamp });
     }
     if (new URL(req.url, origin).searchParams.get('distance') === '1') {
-      let picked; try { picked = JSON.parse(await readBody(req, 1024))?.distance; } catch { return send(res, 400, { error: 'Invalid distance.' }); }
-      if (!distance) return send(res, 409, { error: 'Wait for the check to start.' });
-      if (!Object.hasOwn(DISTANCES, picked)) return send(res, 400, { error: 'Choose high, mixed, or low.' });
+      let picked; try { picked = JSON.parse(await readBody(req, 1024))?.distance; } catch { return send(res, 400, { error: msg('server.http.invalidDistance') }); }
+      if (!distance) return send(res, 409, { error: msg('server.http.waitForStart') });
+      if (!Object.hasOwn(DISTANCES, picked)) return send(res, 400, { error: msg('server.http.chooseDistance') });
       distance.next = picked === distance.current ? null : picked;
       publish(state, { display: true });
       return send(res, 200, { distance: { current: distance.current, next: distance.next } });
     }
     if (new URL(req.url, origin).searchParams.get('model') === '1') {
-      let picked; try { picked = JSON.parse(await readBody(req, 4096)); } catch { return send(res, 400, { error: 'Invalid model choice.' }); }
-      if (!switchModel || !models) return send(res, 409, { error: 'Wait for the check to start.' });
+      let picked; try { picked = JSON.parse(await readBody(req, 4096)); } catch { return send(res, 400, { error: msg('server.http.invalidModelChoice') }); }
+      if (!switchModel || !models) return send(res, 409, { error: msg('server.http.waitForStart') });
       try { return send(res, 200, await switchModel({ provider: picked?.provider, model: typeof picked?.model === 'string' ? picked.model.trim() : '', saveDefault: picked?.saveDefault === true })); }
-      catch (error) { return send(res, error.status || 409, { error: error.message }); }
+      catch (error) { return send(res, error.status || 409, { error: error.ref ?? error.message }); }
     }
     if (new URL(req.url, origin).searchParams.get('update') === '1') {
       // Independent of the check: the install runs only after this process exits.
-      if (!update?.available || update.status === 'scheduled') return send(res, 409, { error: 'No update to install.' });
+      if (!update?.available || update.status === 'scheduled') return send(res, 409, { error: msg('server.http.noUpdate') });
       const plan = await planUpdate().catch(() => null);
       const started = !!plan?.command && await startUpdate({ command: plan.command, env });
       update = { ...update, status: started ? 'scheduled' : 'failed' };
@@ -270,46 +319,47 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
     }
     let bytes = 0; const chunks = [];
     // 8,000 characters can occupy 24KB in UTF-8 or 48KB when JSON-escaped.
-    for await (const chunk of req) { bytes += chunk.length; if (bytes > 64 * 1024) { send(res, 413, { error: 'Keep your response below 8,000 characters.' }); req.destroy(); return; } chunks.push(chunk); }
-    let data; try { data = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return send(res, 400, { error: 'Invalid response.' }); }
+    for await (const chunk of req) { bytes += chunk.length; if (bytes > 64 * 1024) { send(res, 413, { error: msg('server.http.tooLong') }); req.destroy(); return; } chunks.push(chunk); }
+    let data; try { data = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return send(res, 400, { error: msg('server.http.invalidResponse') }); }
     if (!data || typeof data !== 'object' || Array.isArray(data) || Object.keys(data).some(key => !['id', 'revision', 'action', 'response', 'questionId'].includes(key))
-      || typeof data.action !== 'string' || (data.response !== undefined && (typeof data.response !== 'string' || data.response.length > 8000))) return send(res, 400, { error: 'Invalid response.' });
+      || typeof data.action !== 'string' || (data.response !== undefined && (typeof data.response !== 'string' || data.response.length > 8000))) return send(res, 400, { error: msg('server.http.invalidResponse') });
     // Live progress changes the revision often; Pause, Skip, Continue, and Stop only need the checkpoint.
-    if (!active || active.signal.aborted || data.id !== state.id || (!['pause', 'skip', 'proceed', 'stop'].includes(data.action) && data.revision !== state.revision)) return send(res, 409, { error: 'This checkpoint changed. Use the current question.' });
+    if (!active || active.signal.aborted || data.id !== state.id || (!['pause', 'skip', 'proceed', 'stop'].includes(data.action) && data.revision !== state.revision)) return send(res, 409, { error: msg('server.http.checkpointChanged') });
     if (['proceed', 'stop'].includes(data.action) && resolver?.allowed.includes(data.action)) {
       const current = resolver;
-      send(res, 200, state); current.resolve(data); return;
+      send(res, 200, outbound()); current.resolve(data); return;
     }
     const consenting = ['proceed', 'stop'].some(action => resolver?.allowed.includes(action));
     if (data.action === 'skip') {
-      if (consenting) return send(res, 409, { error: `Choose continue or stop for this ${words(state.event)[0]}.` });
+      if (consenting) return send(res, 409, { error: msg(operationKeys(state.event).chooseConsent) });
       // Available at any step, including while the review is still running.
       skip = { reason: data.response };
       active.abort(cancelled());
-      publish({ ...publicFields(state), phase: 'skipped', message: waitingGit ? 'Skipped. Git is continuing; you can close this tab.' : 'Skipped. You can close this tab.' });
-      return send(res, 200, state);
+      publish({ ...publicFields(state), phase: 'skipped', message: msg(waitingGit ? 'server.skipped.gitContinuing' : 'server.skipped.closeTab') });
+      return send(res, 200, outbound());
     }
     if (data.action === 'pause') {
-      if (consenting) return send(res, 409, { error: `Choose continue or stop for this ${words(state.event)[0]}.` });
+      if (consenting) return send(res, 409, { error: msg(operationKeys(state.event).chooseConsent) });
       active.abort(cancelled());
       publish({ ...publicFields(state), phase: 'paused', message: pauseMessage(), ...(resumeCommand ? { resume: resumeCommand } : {}) });
-      return send(res, 200, state);
+      return send(res, 200, outbound());
     }
-    if (!resolver || !resolver.allowed.includes(data.action)) return send(res, 409, { error: 'Wait for the current step to finish.' });
-    if (['answer', 'learn', 'dispute'].includes(data.action) && data.questionId !== state.question?.id) return send(res, 409, { error: 'The question changed. Use the current question.' });
-    if (['answer', 'dispute'].includes(data.action) && !data.response?.trim()) return send(res, 400, { error: 'Enter an answer or a dispute reason first.' });
+    if (!resolver || !resolver.allowed.includes(data.action)) return send(res, 409, { error: msg('server.http.waitForStep') });
+    if (['answer', 'learn', 'dispute'].includes(data.action) && data.questionId !== state.question?.id) return send(res, 409, { error: msg('server.http.questionChanged') });
+    if (['answer', 'dispute'].includes(data.action) && !data.response?.trim()) return send(res, 400, { error: msg('server.http.responseRequired') });
     const current = resolver;
     if (data.action === 'answer') say({ role: 'human', kind: 'answer', text: data.response.trim(), status: 'checking' });
-    else if (data.action === 'dispute') say({ role: 'human', kind: 'dispute', text: `Dispute: ${data.response.trim()}`, status: 'checking' });
-    else if (data.action === 'learn') say({ role: 'human', kind: 'learn', text: 'Explain this concept.', status: 'checking' });
-    publish({ ...publicFields(state), phase: 'working', message: data.action === 'answer' ? 'Checking your reasoning…' : data.action === 'learn' ? 'Preparing an explanation…' : data.action === 'dispute' ? 'Reviewing the question…' : 'Continuing the review…' });
-    send(res, 202, state); current.resolve(data);
+    // The person's own text fills the placeholder once, so braces in it stay as typed.
+    else if (data.action === 'dispute') say({ role: 'human', kind: 'dispute', text: msg('server.transcript.dispute', { text: data.response.trim() }), status: 'checking' });
+    else if (data.action === 'learn') say({ role: 'human', kind: 'learn', text: msg('server.transcript.learn'), status: 'checking' });
+    publish({ ...publicFields(state), phase: 'working', message: msg(data.action === 'answer' ? 'server.working.checkingAnswer' : data.action === 'learn' ? 'server.working.preparingExplanation' : data.action === 'dispute' ? 'server.working.reviewingQuestion' : 'server.working.continuing') });
+    send(res, 202, outbound()); current.resolve(data);
   }
   async function ensureServer(operationEnv, { front }) {
     if (server) return;
     server = createServer((req, res) => {
       res.on('error', () => res.destroy());
-      handle(req, res).catch(() => { if (!res.headersSent) send(res, 400, { error: 'Could not process this response.' }); else res.destroy(); });
+      handle(req, res).catch(() => { if (!res.headersSent) send(res, 400, { error: msg('server.http.processFailed') }); else res.destroy(); });
     });
     server.requestTimeout = 15000; server.headersTimeout = 10000; server.maxHeadersCount = 32;
     // Port 0 asks the OS for a free ephemeral loopback port, so an occupied
@@ -341,7 +391,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
     }, error => {
       if (view !== current) return;
       current.status = 'unavailable';
-      current.reason = error?.code === 'CHANGE_VIEW_UNAVAILABLE' ? error.message : 'The changed files could not be loaded for display.';
+      current.reason = error?.code === 'CHANGE_VIEW_UNAVAILABLE' ? (error.ref ?? error.message) : msg('server.change.loadFailed');
       publish(state, { display: true });
     });
   }
@@ -399,19 +449,22 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
         if (status !== 'passed' || !waitingGit || request.more) return { status: status === 'passed' || status === 'stopped' ? status : 'pending', id: request.id };
         break;
       }
-      const session = await store.read(request.id), config = await readConfig(request.repoRoot, operationEnv);
+      // A copy: a language picked on the page is set on it, never on what readConfig handed out.
+      const session = await store.read(request.id), config = { ...(await readConfig(request.repoRoot, operationEnv)) };
+      if (languageChoice) config.language = languageChoice;
+      language = config.language; activeConfig = config;
       if (session.snapshot.repoRoot !== request.repoRoot) throw new Error('This checkpoint belongs to another repository.');
       await validate(session.snapshot, config);
       startView(request, session.snapshot, config, operationEnv, store);
       await refreshScore(request.repoRoot, operationEnv).catch(() => {});
       let visible = store.public(session);
-      publish({ ...publicFields(visible), repoRoot: request.repoRoot, phase: 'working', message: 'Preparing your understanding check…' });
+      publish({ ...publicFields(visible), repoRoot: request.repoRoot, phase: 'working', message: msg('server.working.preparing') });
       const unattended = unattendedGit(request, { env: operationEnv, terminal });
       await ensureServer(operationEnv, { front: unattended });
       // A Git client shows nothing while its hook waits, and a push it cancelled can leave the hook
       // waiting: once no page has stayed open for abandonMs, stop as the deadline does.
       if (unattended && openedFront) {
-        const [op] = words(session.snapshot.event), minutes = Math.max(1, Math.round(abandonMs / 60000));
+        const op = operation(session.snapshot.event), minutes = Math.max(1, Math.round(abandonMs / 60000));
         let lastSeen = Date.now();
         abandonAfterMs = abandonMs;
         // A page that connects before the next update already says the wait ends.
@@ -448,23 +501,25 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
         visible = await store.switchRoute(request.id, config, provider, { model, signal: localSignal });
         if (saveDefault) pendingDefault = { provider, model };
         await refreshModels(visible.route);
-        say({ role: 'sphinx', kind: 'notice', text: `Switched this check to ${[visible.route.provider === 'openai' ? 'your endpoint' : PLAN_NAMES[provider]?.[0] ?? 'OpenRouter', model].join(' ')}.${saveDefault ? ' It becomes your default when this check ends.' : ''}` });
+        const name = join([visible.route.provider === 'openai' ? msg('server.transcript.yourEndpoint') : PLAN_NAMES[provider]?.[0] ?? 'OpenRouter', model], ' ');
+        say({ role: 'sphinx', kind: 'notice', text: msg(saveDefault ? 'server.transcript.switchedToDefault' : 'server.transcript.switchedTo', { name }) });
         return visible;
       };
       let pendingSwitch = null;
       // What a picked model does depends on the phase: grade with it from now on,
       // restart a running review on it, or retry a failed review with it.
       switchModel = async picked => {
-        const error = message => Object.assign(new Error(message), { status: 409 });
+        // Like every translatable error, an English message and a ref the page draws.
+        const error = key => Object.assign(new Error(t('en', key)), { status: 409, ref: msg(key) });
         const problem = validChoice(models.groups, picked.provider, picked.model, config);
-        if (problem) throw Object.assign(new Error(problem), { status: 400 });
+        if (problem) throw Object.assign(new Error(localize(problem, 'en')), { status: 400, ref: problem });
         const route = store.public(await store.read(request.id)).route;
         if (route.provider === picked.provider && route.model === picked.model) { if (picked.saveDefault) pendingDefault = picked; return { ok: true }; }
-        if (grading) throw error('Switch after this answer is checked.');
+        if (grading) throw error('server.modelSwitch.afterGrading');
         if (reviewAttempt) { pendingSwitch = picked; reviewAttempt.abort(cancelled()); return { ok: true, restarting: true }; }
         if (resolver?.allowed.includes('answer')) { await applySwitch(picked); publish({ ...state, ...publicFields(visible), route: visible.route }); return { ok: true }; }
         if (state.phase === 'recovery' && resolver) { await applySwitch(picked); resolver.resolve({ action: 'switched' }); return { ok: true }; }
-        throw error('Switch once the current step finishes.');
+        throw error('server.modelSwitch.afterStep');
       };
       visible = await prepareInteractiveCheck({ config, signal: localSignal, waitingGit: request.delivery === 'hook', ui: recoveryUI,
         planProviders: plans, switchRoute: provider => store.switchRoute(request.id, config, provider, { signal: localSignal }),
@@ -478,7 +533,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
             localSignal.addEventListener('abort', stop, { once: true });
             reviewAttempt = attempt;
             try {
-              publish({ ...publicFields(store.public(await store.read(request.id))), repoRoot: request.repoRoot, phase: 'working', message: 'Reviewing the change…' });
+              publish({ ...publicFields(store.public(await store.read(request.id))), repoRoot: request.repoRoot, phase: 'working', message: msg('server.working.reviewing') });
               // A pass made while Git waits is saved held: only the Git gate releases it, after Continue.
               return await store.start(request.id, config, { signal: attempt.signal, hold: waitingGit, onProgress: text => {
                 say({ role: 'sphinx', kind: 'activity', text }); publish(state);
@@ -493,12 +548,13 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
             // Background preparation may have finished the review (questions, or a decision
             // to ask none) while the switch waited for it; then no review restarts.
             const switched = await applySwitch(picked);
-            if (!switched.progress.total && switched.preparation?.status !== 'ready') say({ role: 'sphinx', kind: 'activity', text: 'Restarting the review on the new model' });
+            if (!switched.progress.total && switched.preparation?.status !== 'ready') say({ role: 'sphinx', kind: 'activity', text: msg('server.transcript.restarting') });
           }
         },
         choose: async prompt => {
           const current = store.public(await store.read(request.id));
-          const action = await waitForAction({ ...publicFields(current), repoRoot: request.repoRoot, phase: 'recovery', message: prompt.title, error: [prompt.description, ...notes].filter(Boolean).join('\n'), choices: prompt.choices }, prompt.choices.map(choice => choice.value));
+          // The description and notes may be refs or English diagnostics; join() draws them together on the way out.
+          const action = await waitForAction({ ...publicFields(current), repoRoot: request.repoRoot, phase: 'recovery', message: prompt.title, error: join([prompt.description, ...notes].filter(Boolean), '\n'), choices: prompt.choices }, prompt.choices.map(choice => choice.value));
           return action.action;
         },
       });
@@ -509,7 +565,8 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
         localSignal.throwIfAborted();
         showQuestion(visible); refreshEvidence(request.id);
         // The page may be in a background tab; say once that questions are ready.
-        if (!notified) { notified = true; notify({ title: 'Sphinx needs your answers', message: where, env: operationEnv }); }
+        // notifyDesktop prints its title with String(), so it is drawn now.
+        if (!notified) { notified = true; notify({ title: t(language, 'server.notify.answersNeeded'), message: where, env: operationEnv }); }
         // Answers can also arrive from sphinx answer or a terminal check. Follow
         // the saved session so this page, and the Git operation waiting on it, keep up.
         const shown = visible;
@@ -520,7 +577,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
         });
         if (action.action === 'saved') {
           visible = action.visible;
-          if (visible.feedback && visible.feedback !== shown.feedback) say({ role: 'sphinx', kind: 'feedback', text: visible.feedback });
+          if (visible.feedback && visible.feedback !== shown.feedback) say({ role: 'sphinx', kind: 'feedback', text: fallbackText(visible.feedbackCode, visible.feedback) });
           await refreshScore(request.repoRoot, operationEnv).catch(() => {});
           continue;
         }
@@ -538,7 +595,7 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
             if (field.complete) {
               frozen = true;
               // The model is still writing the rest of its reply; say what, so the page never looks stalled.
-              const next = action.action === 'learn' || ['incorrect', 'ambiguous'].includes(partialField(raw, 'verdict')?.text) ? 'Writing a new scenario to try…' : 'Finishing up…';
+              const next = msg(action.action === 'learn' || ['incorrect', 'ambiguous'].includes(partialField(raw, 'verdict')?.text) ? 'server.transcript.newScenario' : 'server.transcript.finishing');
               say({ role: 'sphinx', kind: 'activity', text: next }); step = transcript.at(-1).id;
             }
             const now = Date.now();
@@ -551,58 +608,60 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
           })).finally(() => { dropDraft(); grading = false; });
           settle('graded');
           await refreshScore(request.repoRoot, operationEnv).catch(() => {});
-          if (visible.feedback) say({ role: 'sphinx', kind: 'feedback', text: visible.feedback });
+          if (visible.feedback) say({ role: 'sphinx', kind: 'feedback', text: fallbackText(visible.feedbackCode, visible.feedback) });
           // Without a usable new question no new bubble appears, so say that the same one stays open.
-          if (visible.status !== 'passed' && visible.question?.id === action.questionId) say({ role: 'sphinx', kind: 'notice', text: 'The same question is still open.' });
+          if (visible.status !== 'passed' && visible.question?.id === action.questionId) say({ role: 'sphinx', kind: 'notice', text: msg('server.transcript.sameQuestion') });
         } catch (error) {
           settle('not-graded');
           localSignal.throwIfAborted(); await validate(session.snapshot, config);
           visible = store.public(await store.read(request.id));
           // A rate-limited API route can hand grading to the user's coding-agent plan.
           if ((isRateLimit(error, visible.route) || isCliFailure(error, visible.route)) && switchChoices(plans, visible.route.provider).length) {
-            const choices = [...switchChoices(plans, visible.route.provider), { value: 'back', label: 'Back to the question', description: 'Keep the current model and try again later. Your draft answer is kept.' }];
-            const picked = await waitForAction({ ...publicFields(visible), repoRoot: request.repoRoot, phase: 'recovery', message: isRateLimit(error, visible.route) ? 'Grading was rate limited' : `${PLAN_NAMES[visible.route.provider][0]} could not grade this answer`, error: error.message, choices }, choices.map(choice => choice.value));
+            const choices = [...switchChoices(plans, visible.route.provider), { value: 'back', label: msg('server.gradingRecovery.backLabel'), description: msg('server.gradingRecovery.backDescription') }];
+            const picked = await waitForAction({ ...publicFields(visible), repoRoot: request.repoRoot, phase: 'recovery', message: isRateLimit(error, visible.route) ? msg('server.gradingRecovery.rateLimited') : msg('server.gradingRecovery.cliFailed', { name: PLAN_NAMES[visible.route.provider][0] }), error: error.ref ?? error.message, choices }, choices.map(choice => choice.value));
             if (picked.action.startsWith('switch-')) {
               const provider = picked.action.slice('switch-'.length);
               visible = await store.switchRoute(request.id, config, provider, { signal: localSignal });
-              say({ role: 'sphinx', kind: 'notice', text: `Switched this check to ${PLAN_NAMES[provider][0]}. Send your answer again.` });
+              say({ role: 'sphinx', kind: 'notice', text: msg('server.transcript.switchedToResend', { name: PLAN_NAMES[provider][0] }) });
               continue;
             }
           }
-          publish({ ...publicFields(visible), repoRoot: request.repoRoot, phase: 'question', error: error.message, message: 'Your response was not accepted. Review the error before submitting again.' });
+          publish({ ...publicFields(visible), repoRoot: request.repoRoot, phase: 'question', error: error.ref ?? error.message, message: msg('server.question.notAccepted') });
           // Re-display through waitForAction on the next iteration; never resend.
-          visible = { ...visible, browserError: error.message };
+          visible = { ...visible, browserError: error.ref ?? error.message };
         }
       }
       localSignal.throwIfAborted(); await validate(session.snapshot, config);
-      const [op, Op] = words(session.snapshot.event), result = visible.noQuestionReason ? `No questions needed: ${visible.noQuestionReason}` : 'You passed.';
+      const keys = operationKeys(session.snapshot.event);
+      const result = visible.noQuestionReason ? msg('server.result.noQuestions', { reason: fallbackText(visible.noQuestionCode, visible.noQuestionReason) }) : msg('server.result.passed');
       // Held when this page opened, the pass was made for an earlier push or commit that did not
       // go through; nothing else is asked. (A pass made here is held too, until Git sees Continue.)
-      const earlier = session.status === 'passed' && session.held && `${visible.noQuestionReason ? 'This change needed no questions' : 'You passed this change'} earlier, but that ${op} did not go through.`;
-      const note = visible.noQuestionReason ? '' : '\nThis records your answers, not a review of every changed line.';
+      const earlier = session.status === 'passed' && session.held && msg(visible.noQuestionReason ? keys.noQuestionsEarlier : keys.passedEarlier);
       // A push to several destinations asks once, after the last one passes.
       if (waitingGit && !request.more) {
         // A pass that needed no questions, or a held one, can arrive before anyone looked at the page.
-        if (!notified) notify({ title: `Sphinx: continue the ${op}?`, message: where, env: operationEnv });
-        const consent = await waitForAction({ ...publicFields(visible), repoRoot: request.repoRoot, phase: 'consent', message: `${earlier || result} Continue the ${op}?`, choices: [
-          { value: 'proceed', label: `Continue ${op}`, description: `Continue: the ${op} goes through.` },
-          { value: 'stop', label: `Stop ${op}`, description: `Stop: it does not go through. ${keptPass(op)}` },
+        if (!notified) notify({ title: t(language, keys.notify), message: where, env: operationEnv });
+        const consent = await waitForAction({ ...publicFields(visible), repoRoot: request.repoRoot, phase: 'consent', message: msg(keys.question, { lead: earlier || result }), choices: [
+          { value: 'proceed', label: msg(keys.proceed), description: msg(keys.proceedDescription) },
+          { value: 'stop', label: msg(keys.stop), description: msg('server.consent.stopDescription', { keptPass: msg(keys.keptPass) }) },
         ] }, ['proceed', 'stop']);
         if (consent.action === 'stop') {
           finalStatus = 'pending';
-          publish({ ...publicFields(visible), repoRoot: request.repoRoot, phase: 'stopped', message: `${Op} stopped. It did not go through. ${keptPass(op)} You can close this tab.`, ...(resumeCommand ? { resume: resumeCommand } : {}) });
+          publish({ ...publicFields(visible), repoRoot: request.repoRoot, phase: 'stopped', message: msg(keys.stopped, { keptPass: msg(keys.keptPass) }), ...(resumeCommand ? { resume: resumeCommand } : {}) });
           return { status: 'stopped', id: request.id };
         }
       }
       finalStatus = 'passed';
-      publish({ ...publicFields(visible), repoRoot: request.repoRoot, phase: 'passed', message: `${result} ${!waitingGit ? 'You can close this tab.' : request.more ? `This ${op} has another destination to check next.` : `You can close this tab; Git is finishing the ${op} on its own.`}${note}` });
+      const passed = msg(!waitingGit ? 'server.passed.closeTab' : request.more ? keys.nextDestination : keys.gitFinishing, { result });
+      // The page shows what follows the line break as a note; a pass without questions has no answers to note.
+      publish({ ...publicFields(visible), repoRoot: request.repoRoot, phase: 'passed', message: visible.noQuestionReason ? passed : join([passed, msg('server.result.recordsNote')], '\n') });
       return { status: 'passed', id: request.id };
     } catch (error) {
       settle('not-graded');
       if (skip) return skipped();
       // The waiting Git operation discarded this check because it no longer applies.
-      if (localSignal.reason?.code === 'SPHINX_STALE') publish({ ...publicFields(state), repoRoot: request.repoRoot, phase: 'error', message: 'This check no longer applies.', error: localSignal.reason.message });
-      else publish({ ...publicFields(state), repoRoot: request.repoRoot, phase: localSignal.aborted ? 'paused' : 'error', message: localSignal.aborted ? pauseMessage() : 'The check could not finish. Saved progress and completed checkpoints are retained.', ...(localSignal.aborted ? (resumeCommand ? { resume: resumeCommand } : {}) : { error: error.message }) });
+      if (localSignal.reason?.code === 'SPHINX_STALE') publish({ ...publicFields(state), repoRoot: request.repoRoot, phase: 'error', message: msg('server.error.noLongerApplies'), error: localSignal.reason.ref ?? localSignal.reason.message });
+      else publish({ ...publicFields(state), repoRoot: request.repoRoot, phase: localSignal.aborted ? 'paused' : 'error', message: localSignal.aborted ? pauseMessage() : msg('server.error.couldNotFinish'), ...(localSignal.aborted ? (resumeCommand ? { resume: resumeCommand } : {}) : { error: error.ref ?? error.message }) });
       return { status: 'pending', id: request.id };
     } finally {
       clearInterval(abandonWatch); abandonAfterMs = undefined;
@@ -613,15 +672,18 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
       // default model is not, and is saved at the same time.
       if (pendingDefault) {
         const { provider, model } = pendingDefault; pendingDefault = null;
-        afterClose.push(() => loadConfig(undefined, operationEnv).then(saved => saveConfig({ ...saved, models: { small: { provider, model }, medium: { provider, model }, large: { provider, model } } }, operationEnv)));
+        afterClose.push(() => writeGlobal(saved => ({ ...saved, models: { small: { provider, model }, medium: { provider, model }, large: { provider, model } } })));
       }
       if (distance?.next) { const { next } = distance, root = request.repoRoot; afterClose.push(() => setRepositoryDistance(root, next, { env: operationEnv })); }
-      switchModel = null; models = null; distance = null; stamp = null;
+      // The language and a page's pick of it outlive the check; only the check's settings object does not.
+      switchModel = null; models = null; distance = null; stamp = null; activeConfig = null;
       active = undefined;
     }
   }
   async function close() {
     closed = true; active?.abort(cancelled()); resolver?.reject(cancelled()); resolver = undefined;
+    // A language choice still saving lands before the settings for future checks are written beside it.
+    await configWrites;
     for (const write of afterClose.splice(0)) await write().catch(() => {});
     if (server) {
       // A passed checkpoint may be followed by another destination. Only this
@@ -634,5 +696,5 @@ export function createBrowserInterview({ env = process.env, signal, timeoutMs = 
     }
   }
   // stampChoice(id): the human's choice to post a checkpoint's stamp to its PR, or undefined when not offered.
-  return { present, close, stampChoice: id => stampChoices.get(id), get url() { return url; }, get state() { return structuredClone(state); } };
+  return { present, close, stampChoice: id => stampChoices.get(id), get url() { return url; }, get state() { return structuredClone(outbound()); } };
 }

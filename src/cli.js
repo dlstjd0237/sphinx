@@ -16,15 +16,16 @@ import { install, uninstall, doctor, dispatchHook, installedAgents, detectAgents
 import { activateIntegrations, WINDOWS_ACTIVATION_NOTE } from './activation.js';
 import { checkbox } from './checkbox.js';
 import { agentHook } from './agent.js';
-import { createSessionStore } from './sessions.js';
+import { createSessionStore, fallbackText } from './sessions.js';
 import { parseRoute } from './routing.js';
 import { createTerminal, withProgress } from './terminal.js';
 import { HELP, printHelp } from './help.js';
-import { askInstall, askPolicy, createPrompts, questionCapsText, reviewCapsText, routeText, splitList } from './prompts.js';
+import { askInstall, askPolicy, createPrompts, installLanguage, languageQuestion, questionCapsText, reviewCapsText, routeText, splitList } from './prompts.js';
 import { runGitGate } from './git-gate.js';
 import { loadProjectContext, contextWithDescription, contextWithPreferences, ensurePersonalContext, PROJECT_CONTEXT_TEMPLATE } from './repo-context.js';
 import { REVIEWER_PRESETS, presetOptions } from './model-presets.js';
-import { modelUsageText, modelLimitText, readUsage, summarizeUsage, printUsage, usageDir } from './usage.js';
+import { modelUsageRef, modelUsageText, modelLimitText, readUsage, summarizeUsage, printUsage, usageDir } from './usage.js';
+import { localize, t } from './i18n.js';
 import { toggleYolo, yoloStatus, recentOverrides, recordOverride } from './overrides.js';
 import { runTerminalCheck } from './terminal-check.js';
 
@@ -32,12 +33,12 @@ const CLI_PATH = fileURLToPath(new URL('../bin/sphinx.js', import.meta.url));
 const POLICY_FLAGS = ['branches', 'events', 'level', 'distance', 'remotes'];
 const MODEL_FLAGS = ['preset', 'provider', 'model', 'small', 'medium', 'large', 'allow-paid', 'max-model-calls', 'max-output-tokens', 'cli-billing'];
 const OPTIONS = {
-  install: ['yes', 'repo', 'agents', ...MODEL_FLAGS, 'launch', 'no-launch', ...POLICY_FLAGS],
+  install: ['yes', 'repo', 'agents', 'language', ...MODEL_FLAGS, 'launch', 'no-launch', ...POLICY_FLAGS],
   activate: ['agents', 'json'],
   init: ['yes', 'json', 'context', 'suggest', 'apply', 'github-check', ...POLICY_FLAGS], check: ['json', 'id', 'remote', 'branch', 'staged', 'retry-review'],
   prepare: ['json', 'worker', 'retry'],
   answer: ['json', 'text'], explain: ['json'], dispute: ['json', 'text'], pending: ['json'],
-  status: ['json'], config: ['json', 'distance', 'interface', ...MODEL_FLAGS], doctor: ['json'], auth: ['provider', 'base-url'], uninstall: ['repo'],
+  status: ['json'], config: ['json', 'distance', 'interface', 'language', ...MODEL_FLAGS], doctor: ['json'], auth: ['provider', 'base-url'], uninstall: ['repo'],
   mcp: [], yolo: ['json', 'reason'], usage: ['json'],
 };
 const json = value => console.log(JSON.stringify(value, null, 2));
@@ -135,7 +136,7 @@ export function applyInstallOptions(current, values) {
   }
   if (values['max-model-calls'] !== undefined) config.maxModelCalls = parseModelCalls(values['max-model-calls']);
   if (values['max-output-tokens'] !== undefined) config.maxOutputTokens = parseOutputTokens(values['max-output-tokens']);
-  for (const key of ['provider', 'model', 'level', 'distance', 'interface', 'mode']) if (values[key] !== undefined) config[key] = values[key];
+  for (const key of ['provider', 'model', 'level', 'distance', 'interface', 'language', 'mode']) if (values[key] !== undefined) config[key] = values[key];
   for (const key of ['branches', 'events', 'remotes']) if (values[key] !== undefined) config[key] = splitList(values[key]);
   if (values.provider !== undefined || values.model !== undefined) {
     if (values.provider !== undefined && values.model === undefined) {
@@ -303,9 +304,13 @@ async function installCommand(initial) {
   // Native Windows detects nothing; the guided choice only keeps a Claude Code integration that is already connected.
   const detected = !initial.yes && (initial.agents === undefined || initial.agents === 'auto') ? await (process.platform === 'win32' ? installedAgents() : detectAgents()) : [];
   const installedPlans = initial.yes ? [] : await planProviders().catch(() => []);
-  const values = initial.yes ? initial : await withReadline(ask => askInstall(current, initial, createPrompts({ ask, ui: terminal,
-    select: process.stdin.isTTY && process.stdout.isTTY && process.env.TERM !== 'dumb' ? ask.checkbox : undefined,
-  }), { detectedAgents: detected, hasExistingConfig, installedPlans }));
+  // Without --language, --yes saves the preselected questionnaire language, and guided setup asks for it before askInstall's own questions.
+  const preselected = installLanguage({ hasExistingConfig, current });
+  const values = initial.yes ? { ...initial, language: initial.language ?? preselected } : await withReadline(async ask => {
+    const prompts = createPrompts({ ask, ui: terminal, select: process.stdin.isTTY && process.stdout.isTTY && process.env.TERM !== 'dumb' ? ask.checkbox : undefined });
+    const language = initial.language ?? await prompts.choose(languageQuestion(preselected));
+    return askInstall(current, { ...initial, language }, prompts, { detectedAgents: detected, hasExistingConfig, installedPlans });
+  });
   const config = applyInstallOptions(current, values);
   terminal.section('Machine-wide defaults');
   terminal.paragraph('Each repository can override these branches and remotes in .sphinxconfig to match its own production setup.');
@@ -420,22 +425,23 @@ async function githubCheckCommand(values) {
   return 0;
 }
 
-function printSession(session, terminal = ui()) {
+const TIERS = { small: 'terminal.session.tierSmall', medium: 'terminal.session.tierMedium', large: 'terminal.session.tierLarge' };
+/** What sphinx answer, explain and dispute print, in the questionnaire language. Their --json output stays English. */
+export function printSession(session, terminal = ui(), language = 'en') {
   if (session.feedback) {
-    terminal.section(session.verdict === 'incorrect' ? 'Review this concept' : session.verdict === 'ambiguous' ? 'Clarification needed' : 'Feedback'); terminal.paragraph(session.feedback);
+    terminal.section(t(language, session.verdict === 'incorrect' ? 'terminal.session.feedbackIncorrect' : session.verdict === 'ambiguous' ? 'terminal.session.feedbackAmbiguous' : 'terminal.session.feedback'));
+    terminal.paragraph(localize(fallbackText(session.feedbackCode, session.feedback), language));
   }
   if (session.status === 'passed') {
-    terminal.blank(); terminal.success('Understanding check complete.');
-    terminal.paragraph(process.env.SPHINX_WAITING_GIT === '1'
-      ? "Approval saved. Return to the original Git output for the operation's result."
-      : 'Approval saved for this exact change and destination. A waiting push or commit goes through once you choose Continue in its questionnaire.');
+    terminal.blank(); terminal.success(t(language, 'terminal.done.complete'));
+    terminal.paragraph(t(language, process.env.SPHINX_WAITING_GIT === '1' ? 'terminal.session.approvalSavedWaiting' : 'terminal.done.approvalSaved'));
     return;
   }
-  terminal.blank(); terminal.note(`${session.route.tier} change · ${routeText(session.route)} · ${modelUsageText(session.usage, session.tokens)}`);
-  if (!session.question) { terminal.paragraph('Assessment queued. Run sphinx check to begin.'); return; }
-  terminal.section(`Question ${session.progress.completed + 1} of ${session.progress.total}`); terminal.paragraph(session.question.prompt);
+  terminal.blank(); terminal.note(`${t(language, TIERS[session.route.tier])} · ${routeText(session.route)} · ${localize(modelUsageRef(session.usage, session.tokens), language)}`);
+  if (!session.question) { terminal.paragraph(t(language, 'terminal.session.queued')); return; }
+  terminal.section(t(language, 'terminal.question.number', { number: session.progress.completed + 1, total: session.progress.total })); terminal.paragraph(session.question.prompt);
   if (session.question.choices.length) { terminal.blank(); terminal.rows(session.question.choices.map((choice, index) => [`${index + 1}.`, choice])); }
-  terminal.blank(); terminal.note('Give a prediction and a short reason. /learn for help · /dispute <reason> · /quit to save progress');
+  terminal.blank(); terminal.note(t(language, 'terminal.session.answerHint'));
 }
 
 async function checkCommand(values) {
@@ -448,7 +454,7 @@ async function checkCommand(values) {
   if (session && session.snapshot.repoRoot !== repo.root) throw new Error('This checkpoint belongs to a different repository.');
   if (!session) {
     const snapshot = values.staged ? await git.commitSnapshot({ cwd: repo.root, config }) : await git.manualSnapshot({ cwd: repo.root, config, remote: values.remote, branch: values.branch });
-    if (!snapshot) { if (values.json) json({ status: 'not-required' }); else ui().success('No assessment required by the current policy.'); return 0; }
+    if (!snapshot) { if (values.json) json({ status: 'not-required' }); else ui().success(t(config.language, 'terminal.check.notRequired')); return 0; }
     session = await store.ensure(snapshot, config);
   }
   if (!values.json && !process.stdin.isTTY) throw new Error('Use sphinx check --json from a coding agent, or run in an interactive terminal.');
@@ -466,12 +472,12 @@ async function checkCommand(values) {
       await store.retryReview(session.id, config, { signal });
       signal.throwIfAborted();
       terminal.note(config.maxModelCalls === null
-        ? 'Resuming the review with no model-call limit. Previous usage remains counted.'
-        : `Starting a new review attempt with up to ${config.maxModelCalls} additional model calls, including grading. Previous usage remains counted.`);
+        ? t(config.language, 'terminal.check.retryUnlimited')
+        : t(config.language, 'terminal.check.retryLimited', { calls: config.maxModelCalls }));
     }
     return runTerminalCheck({
       store, session: await store.read(session.id), config, ask, terminal, signal, waitingGit, more,
-      choose: createPrompts({ ask, ui: terminal }).choose,
+      choose: createPrompts({ ask, ui: terminal, language: config.language }).choose,
       validate: () => validateCheckpoint(session.snapshot, config),
       planProviders: await planProviders().catch(() => []),
       // A skip lets the waiting Git operation through; it is logged like the browser's.
@@ -523,7 +529,7 @@ async function statusCommand(command, values) {
 export function parseCommandLine(argv) {
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
     help: { type: 'boolean', short: 'h' }, version: { type: 'boolean', short: 'v' }, json: { type: 'boolean' }, yes: { type: 'boolean' }, repo: { type: 'boolean' }, staged: { type: 'boolean' },
-    preset: { type: 'string' }, provider: { type: 'string' }, model: { type: 'string' }, small: { type: 'string' }, medium: { type: 'string' }, large: { type: 'string' }, level: { type: 'string' }, distance: { type: 'string' }, interface: { type: 'string' }, branches: { type: 'string' }, events: { type: 'string' }, agents: { type: 'string' }, remotes: { type: 'string' },
+    preset: { type: 'string' }, provider: { type: 'string' }, model: { type: 'string' }, small: { type: 'string' }, medium: { type: 'string' }, large: { type: 'string' }, level: { type: 'string' }, distance: { type: 'string' }, interface: { type: 'string' }, language: { type: 'string' }, branches: { type: 'string' }, events: { type: 'string' }, agents: { type: 'string' }, remotes: { type: 'string' },
     remote: { type: 'string' }, branch: { type: 'string' }, id: { type: 'string' }, text: { type: 'string' }, 'allow-paid': { type: 'boolean' },
     context: { type: 'string' }, 'github-check': { type: 'boolean' }, suggest: { type: 'boolean' }, apply: { type: 'string' }, worker: { type: 'boolean' }, retry: { type: 'boolean' }, reason: { type: 'string' }, 'base-url': { type: 'string' }, 'cli-billing': { type: 'string' },
     launch: { type: 'boolean' }, 'no-launch': { type: 'boolean' }, 'retry-review': { type: 'boolean' }, 'max-model-calls': { type: 'string' }, 'max-output-tokens': { type: 'string' },
@@ -596,7 +602,7 @@ export async function main(argv) {
     return result.checks.every(check => check.ok) ? 0 : 1;
   }
   if (command === 'config') {
-    if ([...MODEL_FLAGS, 'distance', 'interface'].some(key => values[key] !== undefined)) {
+    if ([...MODEL_FLAGS, 'distance', 'interface', 'language'].some(key => values[key] !== undefined)) {
       const current = await loadConfig(), previousMaxModelCalls = current.maxModelCalls;
       const config = applyInstallOptions(current, values), maxModelCalls = config.maxModelCalls;
       await saveConfig(config);
@@ -604,6 +610,7 @@ export async function main(argv) {
       if (values.json) { json(result); return 0; }
       const terminal = ui();
       if (values.interface !== undefined) terminal.success(interfaceSummary(config.interface));
+      if (values.language !== undefined) terminal.success(config.language === 'ko' ? 'Questionnaires use Korean.' : 'Questionnaires use English.');
       if (values['max-model-calls'] !== undefined) terminal.success(`Saved machine-wide limit: ${modelLimitText(maxModelCalls)} (previously ${modelLimitText(previousMaxModelCalls)}).`);
       if (values['max-output-tokens'] !== undefined) terminal.success(`Saved output allowance: ${config.maxOutputTokens} tokens per request, including model reasoning. Model calls: ${modelLimitText(maxModelCalls)}.`);
       if (MODEL_FLAGS.some(key => !['max-model-calls', 'max-output-tokens'].includes(key) && values[key] !== undefined)) {
@@ -621,6 +628,7 @@ export async function main(argv) {
     const repo = await git.repository(process.cwd()).catch(() => null), config = await loadConfig(repo?.root);
     if (values.json) { json(config); return 0; }
     const terminal = ui(); terminal.section('Effective configuration'); terminal.rows([['Global settings', getPaths().config]]);
+    terminal.rows([['Questionnaire language', config.language === 'ko' ? 'Korean' : 'English']]);
     if (repo) {
       const info = await repositoryConfigInfo(repo.root);
       terminal.rows([['Repository policy', info.exists ? `${info.path}${info.legacy ? ' (legacy)' : ''}` : 'None; global policy applies']]);
@@ -652,7 +660,7 @@ export async function main(argv) {
     const { repo, config } = await repoConfig(), existing = await store.read(id);
     if (existing.snapshot.repoRoot !== repo.root) throw new Error('This checkpoint belongs to a different repository.');
     const learn = command === 'explain', dispute = command === 'dispute';
-    const result = await withProgress(learn ? 'Preparing an explanation' : dispute ? 'Reviewing the question' : 'Checking your reasoning', () => store.answer(id, learn ? 'I do not know. Explain this concept and give me a different scenario to apply it to.' : values.text, config, { learn, dispute }), { enabled: !values.json });
-    if (values.json) json(result); else printSession(result); return 0;
+    const result = await withProgress(t(config.language, learn ? 'terminal.spinner.explaining' : dispute ? 'terminal.spinner.reviewingQuestion' : 'terminal.spinner.checking'), () => store.answer(id, learn ? 'I do not know. Explain this concept and give me a different scenario to apply it to.' : values.text, config, { learn, dispute }), { enabled: !values.json });
+    if (values.json) json(result); else printSession(result, ui(), config.language); return 0;
   }
 }

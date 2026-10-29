@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import { browserPage } from '../src/browser-page.js';
+import { browserPage, esc } from '../src/browser-page.js';
+import { EN, pageCatalog, t } from '../src/i18n.js';
+import { KO } from '../src/i18n-ko.js';
 
-function page(fetchImpl = () => assert.fail('No request expected'), { narrow = false } = {}) {
+function page(fetchImpl = () => assert.fail('No request expected'), { narrow = false, language = 'en' } = {}) {
   const element = tag => ({ tag, textContent: '', hidden: false, value: '', disabled: false, children: [], style: {}, className: '', title: '', dataset: {}, attributes: {},
     scrollHeight: 0, scrollTop: 0, clientHeight: 0, placeholder: '', querySelectorAll() { return []; },
     setAttribute(name, value) { this.attributes[name] = String(value); }, getAttribute(name) { return this.attributes[name] ?? null; },
@@ -12,15 +14,28 @@ function page(fetchImpl = () => assert.fail('No request expected'), { narrow = f
     set innerHTML(_value) { assert.fail('Untrusted strings must not enter HTML'); },
   });
   const nodes = Object.fromEntries(['meta', 'usage', 'conversation', 'messages', 'composer', 'submit', 'status', 'message', 'feedback', 'error', 'question', 'prompt', 'choices', 'form', 'response', 'recovery', 'pause', 'waiting', 'skip', 'skipbar', 'skipreason', 'skipconfirm', 'skipcancel', 'label', 'dispute'].map(id => [id, element()]));
+  const html = browserPage({ token: 'fixture-token', nonce: 'fixture-nonce', language });
+  // The elements whose words the page fills from data-t* attributes, built from the markup. One with an id is the node the page looks up.
+  const translatable = [...html.split('<script')[0].matchAll(/<(\w+)([^>]*\sdata-t[-=][^>]*)>/gu)].map(([, tag, attrs]) => {
+    const id = attrs.match(/\sid="([^"]+)"/u)?.[1], item = id ? (nodes[id] ??= element(tag)) : element(tag);
+    for (const [, name, key] of attrs.matchAll(/\sdata-(t(?:-\w+)?)="([^"]*)"/gu)) {
+      item.attributes[`data-${name}`] = key;
+      item.dataset[name.replace(/-(\w)/gu, (_, letter) => letter.toUpperCase())] = key;
+    }
+    return item;
+  });
   const buttons = [nodes.pause, element(), { ...element(), dataset: { action: 'learn' } }, { ...element(), dataset: { action: 'dispute' } }];
+  // A [data-t…] selector, or a comma list of them, finds only the translatable elements; every other selector keeps its old answer.
+  const querySelectorAll = selector => selector.includes('[data-t')
+    ? translatable.filter(item => selector.split(',').some(part => Object.hasOwn(item.attributes, part.trim().slice(1, -1))))
+    : selector === '[data-action]' ? buttons.slice(2) : buttons;
   let events;
-  const context = vm.createContext({ document: { visibilityState: 'visible', getElementById: id => nodes[id] ??= element('div'), createElement: element, querySelectorAll: selector => selector === '[data-action]' ? buttons.slice(2) : buttons }, fetch: fetchImpl,
+  const context = vm.createContext({ document: { visibilityState: 'visible', documentElement: { lang: language }, getElementById: id => nodes[id] ??= element('div'), createElement: element, querySelectorAll }, fetch: fetchImpl,
     EventSource: class { constructor() { events = this; this.closed = false; } close() { this.closed = true; } }, matchMedia: () => ({ matches: narrow }),
   });
-  const script = browserPage({ token: 'fixture-token', nonce: 'fixture-nonce' }).match(/<script[^>]*>([\s\S]*?)<\/script>/u)[1];
-  vm.runInContext(script, context);
+  vm.runInContext(html.match(/<script[^>]*>([\s\S]*?)<\/script>/u)[1], context);
   const update = state => events.onmessage({ data: JSON.stringify(state) });
-  return { nodes, buttons, context, update, get events() { return events; } };
+  return { nodes, buttons, translatable, context, update, get events() { return events; } };
 }
 const question = { id: 'a'.repeat(64), sequence: 1, revision: 'r1', phase: 'question', waitingGit: true, target: 'refs/heads/main', repoRoot: '/fixture', question: { id: 'q1', prompt: '<img src=x onerror=steal()>', choices: ['<script>attack()</script>'] }, progress: { completed: 0, total: 1 }, usage: { calls: 1, limit: 20 } };
 
@@ -214,6 +229,7 @@ function changePage() {
     const query = new URL(url, 'http://local').searchParams;
     if (url.includes('/change?')) return { ok: true, json: async () => ({ status: 'ready', id: question.id, header, totals, files: changedFiles, listed: changedFiles.length }) };
     if (url.includes('/diff?')) return { ok: true, json: async () => fileDiff(query.get('path'), query.get('context')) };
+    if (url.endsWith('/action?language=1')) return { ok: true, json: async () => ({}) };
     assert.fail(`Unexpected request ${url}`);
   });
   return { p, requests };
@@ -486,4 +502,293 @@ test('a saved ungraded answer or dispute is restored when its question opens, ke
   d.nodes.response.value = 'Edited.';
   d.update({ ...question, sequence: 2, draft: { kind: 'dispute', text: 'It assumes a unique index.' } });
   assert.equal(d.nodes.response.value, 'Edited.');
+});
+
+const ko = (key, params) => t('ko', key, params);
+
+test('the page renders in Korean from the first Korean state', async () => {
+  // Served in English, as when the language changed before the first state arrived.
+  const { p } = changePage();
+  p.update({ ...withChange, language: 'ko', messages: [{ id: 'm1', role: 'sphinx', kind: 'question', questionId: 'q1', number: 1, text: 'What changes?' }] });
+  await flush();
+  assert.equal(p.context.document.documentElement.lang, 'ko');
+  // Static text and attributes.
+  assert.equal(p.translatable.find(item => item.dataset.t === 'page.header.subtitle').textContent, ko('page.header.subtitle'));
+  assert.equal(p.nodes['file-search'].placeholder, ko('page.files.searchPlaceholder'));
+  assert.equal(p.nodes.messages.getAttribute('aria-label'), ko('page.conversation.listLabel'));
+  assert.equal(p.nodes.response.placeholder, ko('page.composer.answerPlaceholder'));
+  // The script's sentences: the question caption, the file count and the status line.
+  assert.equal(p.nodes.messages.children[0].children[1].textContent, ko('page.conversation.questionNumber', { n: 1 }));
+  assert.equal(p.nodes['count-all'].textContent, ko('page.unit.files', { count: 4, n: '4' }));
+  assert.equal(p.nodes.status.textContent, ko('page.status.questionOf', { n: 1, total: 1 }));
+  assert.equal(p.nodes.waiting.textContent, `${ko('page.waiting.passPush')} ${ko('page.waiting.closingStopPush')}`);
+});
+
+test('the html lang value is escaped', () => {
+  assert.match(browserPage({ token: 'fixture-token', nonce: 'fixture-nonce', language: 'x"><b>' }), /<html lang="x&quot;&gt;&lt;b&gt;">/u);
+});
+
+test('a Korean page served in Korean starts in Korean', () => {
+  const html = browserPage({ token: 'fixture-token', nonce: 'fixture-nonce', language: 'ko' }), markup = html.split('<script')[0];
+  assert.match(html, /^<!doctype html>\n<html lang="ko">/u);
+  assert.ok(html.includes(`<title>${esc(KO['page.title.default'])}</title>`));
+  // Each element and attribute the page translates starts with its Korean text, escaped for HTML.
+  const tags = Array.from(markup.matchAll(/<\w+[^>]*\sdata-t[-=][^>]*>[^<]*/gu), ([tag]) => tag);
+  assert.ok(tags.length >= 40, `${tags.length} translatable elements`);
+  for (const tag of tags) {
+    for (const [attribute, shown] of [['data-t', />([^<]*)$/u], ['data-t-label', /\saria-label="([^"]*)"/u], ['data-t-placeholder', /\splaceholder="([^"]*)"/u], ['data-t-title', /\stitle="([^"]*)"/u]]) {
+      const key = tag.match(new RegExp(`\\s${attribute}="([^"]+)"`, 'u'))?.[1];
+      if (key) assert.equal(tag.match(shown)?.[1], esc(KO[key]), key);
+    }
+  }
+  assert.ok(tags.some(tag => tag.includes(' data-t-title="page.language.chipTitle"')), 'the language chip’s tooltip too');
+  // So does text the script rewrites later.
+  assert.ok(markup.includes(`id="status" class="status" role="status" aria-live="polite">${esc(KO['page.status.connecting'])}<`));
+  assert.ok(markup.includes(`placeholder="${esc(KO['page.composer.answerPlaceholder'])}"`));
+});
+
+test('catalog text is escaped in the HTML and the script', () => {
+  assert.equal(esc('a"<&>'), 'a&quot;&lt;&amp;&gt;');
+  // The script's JSON never holds a "<", so no value (here the token) can end the script or open a comment.
+  const [, script] = browserPage({ token: '</script><!--', nonce: 'fixture-nonce' }).match(/<script[^>]*>([\s\S]*?)<\/script>/u);
+  assert.ok(script.includes('"\\u003c/script>\\u003c!--"'), 'the token is escaped');
+  assert.ok(script.includes(JSON.stringify(pageCatalog()).replace(/</gu, '\\u003c')), 'both catalogs are embedded, escaped the same way');
+});
+
+test('the page draws every page key as t() does, in both languages', () => {
+  const keys = Object.keys(EN).filter(key => key.startsWith('page.'));
+  assert.ok(keys.length > 200, `${keys.length} page keys`);
+  for (const language of ['en', 'ko']) {
+    const tx = vm.runInContext('tx', page(undefined, { language }).context);
+    for (const key of keys) {
+      // Each placeholder gets text that looks like another placeholder and a replacement pattern; a filled value is never read again.
+      const names = Array.from(JSON.stringify(EN[key]).matchAll(/\{(\w+)\}/gu), ([, name]) => name);
+      for (const count of [1, 2]) {
+        const params = { count, ...Object.fromEntries(names.map(name => [name, `{count}$&${name}`])) };
+        assert.equal(tx(key, params), t(language, key, params), `${language} ${key}`);
+      }
+    }
+    assert.equal(tx('page.no.such.key'), 'page.no.such.key');
+  }
+});
+
+// Opens the language chip's menu unless it is open, and picks a language from it, as a click does.
+async function chooseLanguage(p, name) {
+  if (p.nodes.language.getAttribute('aria-expanded') !== 'true') p.nodes.language.onclick();
+  await p.nodes['language-menu'].children.find(item => item.children[1]?.textContent === name).onclick();
+  await flush();
+}
+
+test('switching language redraws the transcript captions and the file counts', async () => {
+  const { p } = changePage();
+  const messages = [{ id: 'm1', role: 'sphinx', kind: 'question', questionId: 'q1', number: 1, text: 'What changes?' }, { id: 'm2', role: 'human', kind: 'answer', text: 'It retries.', status: 'checking' }];
+  p.update({ ...withChange, language: 'en', messages }); await flush();
+  assert.deepEqual(p.nodes.messages.children.map(row => row.children[0].textContent), ['Sphinx', 'You']);
+  await chooseLanguage(p, '한국어');
+  const [asked, answered] = p.nodes.messages.children;
+  assert.equal(asked.children[1].textContent, ko('page.conversation.questionNumber', { n: 1 }));
+  assert.equal(answered.children[0].textContent, ko('page.conversation.you'));
+  assert.equal(answered.children.at(-1).textContent, ko('page.conversation.checking'));
+  const files = n => ko('page.unit.files', { count: n, n: String(n) });
+  assert.equal(p.nodes['count-all'].textContent, files(4));
+  assert.equal(p.nodes['filter-total'].textContent, ko('page.files.allTotal', { totals: [files(4), `+5 −3 ${ko('page.totals.lines')}`, ko('page.totals.binaryFiles', { count: 1, n: '1' })].join(' · ') }));
+  assert.equal(fileButtons(p)[1].children[0].textContent, ko('page.fileStatus.binary'));
+  assert.equal(p.nodes['files-note'].textContent, ko('page.files.excludedNote', { count: 1, n: '1' }));
+});
+
+test('switching language in dispute mode keeps the dispute texts and the draft', async () => {
+  const bodies = [];
+  const p = page(async (url, init) => { bodies.push([url, JSON.parse(init.body)]); return { ok: true, json: async () => ({ ...question, sequence: 9, phase: 'working', language: 'ko' }) }; });
+  p.update({ ...question, language: 'en' });
+  p.nodes.dispute.onclick(); p.nodes.response.value = 'draft';
+  let focused = 0; p.nodes.response.focus = () => { focused++; };
+  await chooseLanguage(p, '한국어');
+  assert.deepEqual([p.nodes.label.textContent, p.nodes.response.placeholder, p.nodes.submit.textContent, p.nodes.dispute.textContent],
+    [ko('page.composer.disputeLabel'), ko('page.composer.disputePlaceholder'), ko('page.composer.sendDispute'), ko('page.composer.backToAnswer')]);
+  assert.equal(p.nodes.response.value, 'draft');
+  assert.equal(focused, 0, 'a switch leaves the focus where it is');
+  p.nodes.form.onsubmit({ preventDefault() {} }); await flush();
+  assert.deepEqual(bodies.map(([url, body]) => [url, body.language ?? body.action, body.response]), [['/fixture-token/action?language=1', 'ko', undefined], ['/fixture-token/action', 'dispute', 'draft']]);
+});
+
+test('switching language with a diff open keeps the path title', async () => {
+  // The hint is shown before the code references arrive, so only the switch itself can redraw the open diff.
+  const { p } = changePage();
+  p.update({ ...withChange, language: 'en', evidence: undefined }); await flush();
+  p.nodes.hint.onclick(); fileButtons(p)[3].onclick(); await flush();
+  assert.equal(p.nodes['diff-title'].textContent, 'src/new.js');
+  await chooseLanguage(p, '한국어');
+  assert.equal(p.nodes['diff-title'].textContent, 'src/new.js');
+  assert.equal(p.nodes['diff-meta'].textContent, [ko('page.fileStatus.modified'), '+2 −1', ko('page.diff.contextLines', { n: '3' })].join(' · '));
+  assert.equal(p.nodes['diff-body'].children[0].children[0].children[0].children[0].textContent, ko('page.diff.hiddenLines', { count: 3, n: '3' }));
+});
+
+test('switching language with no file open rewrites the diff pane and the copy button', async () => {
+  const { p } = changePage();
+  p.update({ ...withChange, language: 'en' }); await flush();
+  await chooseLanguage(p, '한국어');
+  assert.equal(p.nodes['diff-title'].textContent, ko('page.diff.noFile'));
+  assert.equal(p.nodes['diff-meta'].textContent, ko('page.diff.browse'));
+  assert.equal(p.nodes['resume-copy'].textContent, ko('page.resume.copy'));
+});
+
+test('switching language with only a model question redraws the speaker label', () => {
+  const p = page();
+  const messages = [{ id: 'm1', role: 'sphinx', kind: 'question', questionId: 'q1', number: 1, text: 'What changes?' }];
+  p.update({ ...question, language: 'en', messages });
+  const [row] = p.nodes.messages.children;
+  assert.deepEqual(row.children.slice(0, 2).map(node => node.textContent), ['Sphinx', 'Question 1']);
+  // Another tab switched. The server's next frame carries the same model text, so only the language marks it as new.
+  p.update({ ...question, sequence: 2, language: 'ko', messages });
+  const [redrawn] = p.nodes.messages.children;
+  assert.notEqual(redrawn, row, 'the transcript is drawn again');
+  assert.deepEqual(redrawn.children.slice(0, 2).map(node => node.textContent), [ko('page.conversation.sphinx'), ko('page.conversation.questionNumber', { n: 1 })]);
+  assert.equal(p.nodes['scope-note'].textContent, ko('page.scope.note'), 'with no change header, nothing else writes the scope note');
+});
+
+test('switching language redraws the notes written once: load failures and the model menu error', async () => {
+  // The changed files fail to load, and every later attempt hangs, so only the page can redraw the note.
+  let changeAsked = 0;
+  const failing = page(async url => {
+    if (url.includes('/change?')) return ++changeAsked === 1 ? { ok: false, json: async () => ({}) } : new Promise(() => {});
+    if (url.endsWith('/action?language=1')) return { ok: true, json: async () => ({}) };
+    assert.fail(`Unexpected request ${url}`);
+  });
+  failing.update({ ...withChange, language: 'en' }); await flush();
+  assert.equal(failing.nodes['files-note'].textContent, 'Changed files are unavailable: the request failed.');
+  await chooseLanguage(failing, '한국어');
+  assert.equal(failing.nodes['files-note'].textContent, ko('page.files.unavailable', { reason: ko('page.files.requestFailed') }));
+  // One file's diff cannot be fetched, and another's is still loading.
+  const p = page(async url => {
+    if (url.includes('/change?')) return { ok: true, json: async () => ({ status: 'ready', id: question.id, header, totals, files: changedFiles, listed: changedFiles.length }) };
+    if (url.includes('/diff?')) return url.includes('path=gone.txt') ? Promise.reject(new Error('offline')) : new Promise(() => {});
+    if (url.endsWith('/action?language=1')) return { ok: true, json: async () => ({}) };
+    assert.fail(`Unexpected request ${url}`);
+  });
+  p.update({ ...withChange, language: 'en' }); await flush();
+  fileButtons(p)[2].onclick(); await flush();
+  assert.equal(p.nodes['diff-note'].textContent, 'The diff could not be loaded. Your answer is unaffected.');
+  await chooseLanguage(p, '한국어');
+  assert.deepEqual([p.nodes['diff-title'].textContent, p.nodes['diff-meta'].textContent, p.nodes['diff-note'].textContent], ['gone.txt', '', ko('page.diff.loadFailed')]);
+  fileButtons(p)[3].onclick(); await flush();
+  await chooseLanguage(p, 'English');
+  assert.deepEqual([p.nodes['diff-title'].textContent, p.nodes['diff-meta'].textContent], ['src/new.js', 'Loading diff…'], 'a failure before this load is not drawn again');
+  // The model menu shows a refused switch, and another tab switches the language while it is open.
+  const models = { groups: [{ provider: 'claude', label: 'Claude Code', billing: 'your plan', models: [{ model: 'haiku', label: 'haiku' }, { model: 'sonnet', label: 'sonnet' }] }] };
+  const m = page(async () => ({ ok: false, json: async () => ({}) }));
+  m.update({ ...question, language: 'en', models, route: { provider: 'claude', model: 'haiku' } });
+  m.nodes.model.onclick();
+  m.nodes['model-menu'].children.find(item => item.children[1]?.textContent === 'sonnet').onclick(); await flush();
+  assert.equal(m.nodes['model-menu'].children.find(item => item.className === 'menu-error').textContent, 'Could not switch models.');
+  m.update({ ...question, sequence: 2, language: 'ko', models, route: { provider: 'claude', model: 'haiku' } });
+  assert.equal(m.nodes['model-menu'].children.find(item => item.className === 'menu-error').textContent, ko('page.model.switchFailed'));
+});
+
+test('a stale frame does not revert the language, another tab\'s switch is followed', async () => {
+  const p = page(async () => ({ ok: true, json: async () => ({}) }));
+  const shown = () => [p.context.document.documentElement.lang, p.nodes.status.textContent, p.nodes.language.children[0].textContent];
+  const korean = ['ko', ko('page.status.questionOf', { n: 1, total: 1 }), '한국어'], english = ['en', 'Question 1 of 1', 'English'];
+  p.update({ ...question, language: 'en' });
+  await chooseLanguage(p, '한국어');
+  assert.deepEqual(shown(), korean);
+  // Sent before the server switched: it repeats the last state's language, so the pick stands.
+  p.update({ ...question, sequence: 2, language: 'en' });
+  assert.deepEqual(shown(), korean);
+  // A state without a language changes nothing.
+  p.update({ ...question, sequence: 3 });
+  assert.deepEqual(shown(), korean);
+  // The server took the pick; then another tab picks English.
+  p.update({ ...question, sequence: 4, language: 'ko' });
+  assert.deepEqual(shown(), korean);
+  p.update({ ...question, sequence: 5, language: 'en' });
+  assert.deepEqual(shown(), english);
+  p.update({ ...question, sequence: 6 });
+  assert.deepEqual(shown(), english);
+});
+
+test('the chip posts the language and shows languageError in its menu', async () => {
+  const requests = [];
+  const p = page(async (url, init) => { requests.push([url, init]); return { ok: true, json: async () => ({ ...question, sequence: 2, language: 'ko', languageError: 'Could not save the language setting: <b>EACCES</b>' }) }; });
+  p.update({ ...question, language: 'en' });
+  const chip = p.nodes.language, menu = p.nodes['language-menu'];
+  assert.equal(chip.hidden, false);
+  assert.equal(chip.children[0].textContent, 'English');
+  chip.onclick();
+  assert.deepEqual(menu.children.map(item => item.children.length ? item.children.map(part => part.textContent) : item.textContent), ['Questionnaire language', ['●', 'English'], ['', '한국어']]);
+  let focused = 0; chip.focus = () => { focused++; };
+  await chooseLanguage(p, '한국어');
+  assert.equal(focused, 1, 'the redrawn menu dropped the focused option, so focus is back on the chip');
+  assert.deepEqual(requests.map(([url, init]) => [url, init.method, { ...init.headers }, JSON.parse(init.body)]), [['/fixture-token/action?language=1', 'POST', { 'Content-Type': 'application/json', 'X-Sphinx-Token': 'fixture-token' }, { language: 'ko' }]]);
+  assert.equal(chip.children[0].textContent, '한국어');
+  assert.equal(menu.hidden, false, 'the menu stays open to show the error');
+  const error = menu.children.at(-1);
+  assert.equal(error.className, 'menu-error');
+  assert.equal(error.textContent, 'Could not save the language setting: <b>EACCES</b>');
+  assert.equal(menu.children[0].textContent, ko('page.language.menuTitle'));
+});
+
+test('a refused or unreachable pick shows its error in the menu, and the page follows the next state', async () => {
+  let reply;
+  const p = page(async () => reply());
+  const shown = () => [p.context.document.documentElement.lang, p.nodes['language-menu'].children.at(-1).textContent];
+  p.update({ ...question, language: 'en' });
+  reply = () => ({ ok: false, json: async () => ({ error: 'This questionnaire is closing.' }) });
+  await chooseLanguage(p, '한국어');
+  assert.deepEqual(shown(), ['ko', 'This questionnaire is closing.'], 'the pick stands until the server says otherwise, and its error shows as sent');
+  await chooseLanguage(p, '한국어');
+  assert.deepEqual(shown(), ['ko', 'This questionnaire is closing.'], 'a second pick is not undone by its own redraw');
+  // The server kept English, so its next state brings the page back.
+  p.update({ ...question, sequence: 2, language: 'en' });
+  assert.deepEqual([...shown(), p.nodes.status.textContent], ['en', 'This questionnaire is closing.', 'Question 1 of 1']);
+  reply = () => Promise.reject(new Error('offline'));
+  await chooseLanguage(p, '한국어');
+  assert.deepEqual(shown(), ['ko', ko('page.menu.unreachable')]);
+  p.update({ ...question, sequence: 3, language: 'en' });
+  assert.deepEqual(shown(), ['en', 'Could not reach Sphinx. Try again.'], 'the menu’s own words follow too');
+});
+
+test('the language menu opens and closes like the other chip menus', () => {
+  const p = page();
+  const models = { groups: [{ provider: 'claude', label: 'Claude Code', billing: 'your plan', models: [{ model: 'haiku', label: 'haiku' }] }] };
+  p.update({ ...question, language: 'en', models, route: { provider: 'claude', model: 'haiku' }, distance: { current: 'mixed', next: null, scope: 'machine' } });
+  const chip = p.nodes.language, menu = p.nodes['language-menu'];
+  let focused = 0; chip.focus = () => { focused++; };
+  chip.onclick();
+  assert.deepEqual([menu.hidden, chip.getAttribute('aria-expanded')], [false, 'true']);
+  p.context.document.onkeydown({ key: 'Escape' });
+  assert.deepEqual([menu.hidden, chip.getAttribute('aria-expanded'), focused], [true, 'false', 1], 'Escape closes it and returns to the chip');
+  for (const other of ['model', 'distance']) {
+    chip.onclick(); p.nodes[other].onclick();
+    assert.deepEqual([menu.hidden, p.nodes[`${other}-menu`].hidden], [true, false], `opening the ${other} menu closes it`);
+    chip.onclick();
+    assert.deepEqual([menu.hidden, p.nodes[`${other}-menu`].hidden], [false, true], `opening it closes the ${other} menu`);
+    chip.onclick();
+  }
+  chip.onclick(); p.context.document.onclick({ target: p.nodes.prompt });
+  assert.equal(menu.hidden, true, 'a click outside closes it');
+  chip.onclick();
+  p.update({ ...question, sequence: 2, phase: 'passed', language: 'en' });
+  assert.deepEqual([chip.hidden, menu.hidden], [true, true], 'a finished check has no chip');
+});
+
+test('a frame that switches the language and raises the score keeps the new dot\'s pop', () => {
+  const p = page();
+  const score = (answered, recent) => ({ calibrating: true, answered, needed: 5 - answered, accuracy: null, streak: 1, skipRate: null, recent });
+  p.update({ ...question, language: 'en', score: score(1, [true]) });
+  p.update({ ...question, sequence: 2, language: 'ko', score: score(2, [true, false]) });
+  assert.equal(p.nodes['score-dots'].children[1].className, 'miss fresh');
+  assert.equal(p.nodes['score-value'].textContent, ko('page.score.warmingUp'));
+});
+
+test('the Korean stamp tooltip says questions are quoted in their language', () => {
+  const stamped = { ...question, stamp: { post: false, action: false } }, action = { post: true, action: true };
+  const en = page(); en.update(stamped);
+  assert.equal(en.nodes['stamp-row'].title, 'After you pass, Sphinx comments on this branch’s pull request with a summary: how many questions, which you got right first time, and the model. Your answers are not included unless you turn that on in your settings.');
+  en.update({ ...stamped, sequence: 2, stamp: action });
+  assert.equal(en.nodes['stamp-row'].title, 'This repository shows a Sphinx check on pull requests. After you pass, Sphinx comments on this branch’s pull request with a summary: how many questions, which you got right first time, and the model. The Sphinx check reads it. Your answers are not included unless you turn that on in your settings.');
+  const kr = page(undefined, { language: 'ko' }); kr.update({ ...stamped, language: 'ko' });
+  assert.equal(kr.nodes['stamp-row'].title, KO['page.stamp.tooltip']);
+  kr.update({ ...stamped, sequence: 2, language: 'ko', stamp: action });
+  assert.equal(kr.nodes['stamp-row'].title, KO['page.stamp.tooltipAction']);
+  for (const key of ['page.stamp.tooltip', 'page.stamp.tooltipAction']) assert.ok(KO[key].includes('댓글은 질문을 물어본 언어 그대로 인용합니다.'), key);
 });

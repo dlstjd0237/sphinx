@@ -6,6 +6,7 @@ import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { getPaths, DEFAULT_CONFIG } from '../src/config.js';
 import { runNativeCheckpoint } from '../src/native-check.js';
 import { registerPiIntegration, elicitPiForm, preparePiIntegration, removePiIntegration, piIntegrationStatus, PI_GUIDANCE } from '../src/pi-integration.js';
+import { KO } from '../src/i18n-ko.js';
 
 function host(options = {}) {
   const handlers = new Map(), notifications = [], selections = [], inputs = [];
@@ -109,6 +110,45 @@ test('dialog pause, cancellation, learning, and disputes preserve their distinct
   assert.deepEqual(await elicitPiForm(h.ctx, form), { action: 'accept', content: { action: 'dispute', response: 'HUMAN_PRIVATE' } });
   h.ctx.ui.input = async () => undefined;
   assert.deepEqual(await elicitPiForm(h.ctx, form), { action: 'cancel' });
+});
+
+test('Pi shows Korean action labels and maps them back to actions', async () => {
+  const h = host();
+  const form = { message: '재시도 뒤에는 무엇이 바뀝니까?', requestedSchema: {}, language: 'ko' };
+  const labels = [KO['form.pi.answer'], KO['form.pi.learn'], KO['form.pi.dispute'], KO['form.pi.pause']];
+  for (const [label, expected] of [
+    [labels[0], { action: 'accept', content: { action: 'answer', response: 'HUMAN_PRIVATE' } }],
+    [labels[1], { action: 'accept', content: { action: 'learn' } }],
+    [labels[2], { action: 'accept', content: { action: 'dispute', response: 'HUMAN_PRIVATE' } }],
+    [labels[3], { action: 'accept', content: { action: 'pause' } }],
+  ]) {
+    h.ctx.ui.select = async (...args) => { h.selections.push(args); return label; };
+    assert.deepEqual(await elicitPiForm(h.ctx, form), expected);
+  }
+  assert.equal(new Set(labels).size, 4);
+  for (const label of labels) assert.match(label, /[가-힣]/u);
+  assert.deepEqual(h.selections.map(([title, options]) => [title, options]), Array(4).fill([form.message, labels]));
+  // The answer and dispute prompts and the length hint are Korean too.
+  assert.deepEqual(h.inputs.map(([title, hint]) => [title, hint]), [
+    [`${form.message}\n\n${KO['form.pi.answerPrompt']}`, KO['form.pi.inputHint']],
+    [`${form.message}\n\n${KO['form.pi.disputePrompt']}`, KO['form.pi.inputHint']],
+  ]);
+});
+
+test('a form without language keeps the English labels', async () => {
+  for (const language of [undefined, 'en']) {
+    const h = host();
+    const form = { message: 'What changes after a retry?', requestedSchema: {}, ...(language ? { language } : {}) };
+    assert.deepEqual(await elicitPiForm(h.ctx, form), { action: 'accept', content: { action: 'answer', response: 'HUMAN_PRIVATE' } });
+    h.ctx.ui.select = async (...args) => { h.selections.push(args); return 'Dispute this question'; };
+    assert.deepEqual(await elicitPiForm(h.ctx, form), { action: 'accept', content: { action: 'dispute', response: 'HUMAN_PRIVATE' } });
+    assert.deepEqual(h.selections.map(([title, options]) => [title, options]),
+      Array(2).fill([form.message, ['Answer', 'Learn, then try a new scenario', 'Dispute this question', 'Pause']]), String(language));
+    assert.deepEqual(h.inputs.map(([title, hint]) => [title, hint]), [
+      [`${form.message}\n\nYour prediction and short reason`, 'Up to 8,000 characters. Escape pauses the checkpoint.'],
+      [`${form.message}\n\nWhy is this question ambiguous or incorrect?`, 'Up to 8,000 characters. Escape pauses the checkpoint.'],
+    ], String(language));
+  }
 });
 
 test('Pi serializes sibling shell checkpoints and aborts dialog work at session shutdown', async () => {

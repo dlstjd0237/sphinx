@@ -9,6 +9,8 @@ import { DEFAULT_CONFIG, loadConfig, writeJson } from '../src/config.js';
 import { commitSnapshot, pushSnapshots } from '../src/git.js';
 import { createReviewWorkspace } from '../src/review-workspace.js';
 import { VIEW_LIMITS, loadChangeView } from '../src/change-view.js';
+import { localize } from '../src/i18n.js';
+import { KO } from '../src/i18n-ko.js';
 
 const exec = promisify(execFile);
 const zero = '0'.repeat(40);
@@ -129,6 +131,22 @@ test('file diffs show line numbers, meaningful special states, and expandable co
   assert.equal((await view.diff('scripts/run.sh')).note, 'mode-only');
   await assert.rejects(view.diff('.env'), /not part of this checkpoint/);
   await assert.rejects(view.diff('src/dependency.js'), /not part of this checkpoint/);
+});
+
+test('ChangeViewError keeps its English message and carries a ref', async () => {
+  for (const [snapshot, key, message] of [
+    [{}, 'server.changeView.noInventory', 'This checkpoint has no recorded file inventory.'],
+    [{ repoRoot: '/r', files: [], event: 'pre-push', head: 'not-an-object' }, 'server.changeView.headNotImmutable', 'The checkpoint head is not an immutable Git object.'],
+  ]) {
+    await assert.rejects(loadChangeView(snapshot, DEFAULT_CONFIG), error => {
+      assert.equal(error.code, 'CHANGE_VIEW_UNAVAILABLE');
+      assert.equal(error.message, message);
+      assert.deepEqual(error.ref, { $t: key });
+      assert.equal(localize(error.ref, 'en'), message);
+      assert.equal(localize(error.ref, 'ko'), KO[key]);
+      return true;
+    });
+  }
 });
 
 test('large diffs are truncated with honest counts instead of silently shortened', async t => {

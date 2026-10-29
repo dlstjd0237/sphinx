@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { colorEnabled, createTerminal, stripAnsi, wrapText, withProgress, formatError, SPHINX } from '../src/terminal.js';
+import { colorEnabled, createTerminal, displayWidth, stripAnsi, wrapText, withProgress, formatError, SPHINX } from '../src/terminal.js';
 import { printHelp, HELP } from '../src/help.js';
-import { askInstall, askPolicy, createPrompts } from '../src/prompts.js';
+import { askInstall, askPolicy, createPrompts, installLanguage, languageQuestion } from '../src/prompts.js';
 import { applyInstallOptions } from '../src/cli.js';
 import { DEFAULT_CONFIG } from '../src/config.js';
 import { presetOptions } from '../src/model-presets.js';
@@ -41,6 +41,101 @@ test('wrapping respects visible width, long tokens, indentation, and blank parag
   assert.equal(stripAnsi(text).replace(/\s/g, ''), 'Aratherlongsentence' + 'x'.repeat(100));
 });
 
+// Widths below are measured with displayWidth, never .length: .length counts a Hangul syllable as one column, so a
+// Korean line that overflows the terminal would still pass.
+const fits = (text, width) => text.split('\n').every(line => displayWidth(line) <= width);
+const startColumn = (line, marker) => displayWidth(line.slice(0, line.indexOf(marker)));
+const ZWJ_FAMILY = '\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}';
+
+test('displayWidth counts Hangul, emoji, ZWJ sequences, NFD jamo and ANSI by display columns', () => {
+  assert.equal(displayWidth('한국어'), 6);
+  assert.equal(displayWidth('abc'), 3);
+  assert.equal(displayWidth('🚀'), 2);
+  assert.equal(displayWidth(ZWJ_FAMILY), 2, 'a ZWJ family is one wide emoji');
+  assert.equal(displayWidth('✓'), 1);
+  assert.equal(displayWidth('\u{1112}\u{1161}\u{11AB}'), 2, 'a decomposed syllable is one wide cell');
+  assert.equal(displayWidth('한글'.normalize('NFD')), 4);
+  assert.equal(displayWidth('\x1b[31m한\x1b[0m'), 2, 'color codes take no column');
+  assert.equal(displayWidth('a한b'), 4);
+  // Marks and invisible characters add no column of their own.
+  assert.equal(displayWidth(''), 0);
+  assert.equal(displayWidth('e\u{301}'), 1);
+  assert.equal(displayWidth('\u{301}'), 0);
+  assert.equal(displayWidth('a\u{200B}b'), 2);
+  assert.equal(displayWidth('\u{600}a'), 1, 'a grapheme is empty only when every code point in it is');
+  // Emoji presentation, a variation selector, flags and full-width forms are wide; text symbols and half-width forms are not.
+  assert.equal(displayWidth('\u{2764}\u{FE0F}'), 2);
+  assert.equal(displayWidth('\u{2764}'), 1);
+  assert.equal(displayWidth('\u{1F1F0}\u{1F1F7}'), 2);
+  assert.equal(displayWidth('漢'), 2);
+  assert.equal(displayWidth('\u{FF21}'), 2);
+  assert.equal(displayWidth('\u{FF71}'), 1);
+  assert.equal(displayWidth('\u{2705}'), 2, 'a BMP character with emoji presentation');
+  assert.equal(displayWidth('\u{20DD}'), 0, 'an enclosing mark');
+  assert.equal(displayWidth('\u{1161}\u{11AB}'), 0, 'vowel and final jamo alone');
+  assert.equal(displayWidth('\u{D7B0}'), 0, 'extended jamo');
+  // Both ends of every wide range are two columns, and the characters just outside them are one.
+  for (const [from, to] of [[0x1100, 0x115F], [0x2E80, 0xA4CF], [0xAC00, 0xD7A3], [0xF900, 0xFAFF], [0xFE30, 0xFE4F], [0xFF00, 0xFF60], [0xFFE0, 0xFFE6], [0x20000, 0x3FFFD]]) {
+    for (const codePoint of [from, to]) assert.equal(displayWidth(String.fromCodePoint(codePoint)), 2, `U+${codePoint.toString(16)}`);
+  }
+  for (const codePoint of [0x10FF, 0xA4D0, 0xD7A4, 0xFB00, 0xFF61, 0xFFE8]) assert.equal(displayWidth(String.fromCodePoint(codePoint)), 1, `U+${codePoint.toString(16)}`);
+  // The glyphs Sphinx draws itself count one column, and printable ASCII is unchanged, so English keeps its width.
+  for (const glyph of ['◆', '→', '·', '●', '○', '─', '┃', '│', '‖', '◇', '…', '−', '›', '✓', '✗', '↷']) assert.equal(displayWidth(glyph), 1, glyph);
+  const ascii = Array.from({ length: 95 }, (_, index) => String.fromCharCode(32 + index)).join('');
+  assert.equal(displayWidth(ascii), ascii.length);
+});
+
+test('a soft hyphen takes one column, so English text with soft hyphens wraps as it did before display widths', () => {
+  // Terminals draw U+00AD, so it is the one format character that is not zero-width.
+  assert.equal(displayWidth('\u{AD}'), 1);
+  assert.equal(displayWidth('re\u{AD}try'), 6);
+  assert.equal(displayWidth('\u{200B}\u{AD}\u{2060}'), 1);
+  // Expected output from wrapText as it was before Sphinx measured display columns, when each UTF-16 unit was one column.
+  const text = 'Pass the idem\u{AD}po\u{AD}tency key to every re\u{AD}try so the pay\u{AD}ment runs once, and in\u{AD}ter\u{AD}na\u{AD}tion\u{AD}al\u{AD}iza\u{AD}tion stays in\u{AD}tact.';
+  assert.equal(wrapText(text, 30, '  '), '  Pass the idem\u{AD}po\u{AD}tency key\n  to every re\u{AD}try so the\n  pay\u{AD}ment runs once, and\n  in\u{AD}ter\u{AD}na\u{AD}tion\u{AD}al\u{AD}iza\u{AD}tion\n  stays in\u{AD}tact.');
+  assert.equal(wrapText(text, 20), 'Pass the\nidem\u{AD}po\u{AD}tency key to\nevery re\u{AD}try so the\npay\u{AD}ment runs once,\nand\nin\u{AD}ter\u{AD}na\u{AD}tion\u{AD}al\u{AD}iz\na\u{AD}tion stays\nin\u{AD}tact.');
+  assert.ok(fits(wrapText(text, 30, '  '), 30) && fits(wrapText(text, 20), 20));
+});
+
+test('wrapText never exceeds the width with Korean text', () => {
+  const text = '이 변경은 재시도 때 같은 결제가 두 번 저장될 수 있는지 확인합니다. 답을 보내기 전에 코드를 먼저 살펴보고, 확신이 없으면 /learn 으로 설명을 요청해 주세요.';
+  for (const width of [20, 30, 80]) {
+    for (const indent of ['', '  ', '한']) {
+      const wrapped = wrapText(text, width, indent);
+      assert.ok(fits(wrapped, width), `width ${width}, indent ${JSON.stringify(indent)}:\n${wrapped}`);
+      assert.equal(wrapped.split('\n').map(line => line.slice(indent.length)).join('').replace(/\s/gu, ''), text.replace(/\s/gu, ''), 'no character is lost');
+    }
+  }
+  const colored = wrapText(`\x1b[1m${text}\x1b[0m`, 30);
+  assert.ok(fits(colored, 30), colored);
+  assert.equal(stripAnsi(colored).replace(/\s/gu, ''), text.replace(/\s/gu, ''));
+});
+
+test('a long unbroken Hangul word wraps at grapheme boundaries', () => {
+  const word = '대한민국만세'.repeat(10);
+  assert.equal(word.length, 60);
+  const lines = wrapText(word, 20).split('\n');
+  assert.ok(lines.every(line => displayWidth(line) <= 20), lines.join('\n'));
+  assert.equal(lines.length, 6);
+  assert.equal(lines.join(''), word, 'the lines join back to the word');
+  // Decomposed jamo: a syllable is two or three code points, and no line may end inside one.
+  const jamo = word.normalize('NFD');
+  const jamoLines = wrapText(jamo, 20).split('\n');
+  assert.ok(jamoLines.every(line => displayWidth(line) <= 20), jamoLines.join('\n'));
+  assert.equal(jamoLines.join(''), jamo);
+  assert.ok(jamoLines.every(line => /^[가-힣]+$/u.test(line.normalize('NFC'))), 'no syllable is cut in two');
+  // A ZWJ sequence and a surrogate pair are each one grapheme too.
+  const familyLines = wrapText(ZWJ_FAMILY.repeat(15), 20).split('\n');
+  assert.ok(familyLines.every(line => displayWidth(line) <= 20 && line === ZWJ_FAMILY.repeat(line.length / ZWJ_FAMILY.length)), JSON.stringify(familyLines));
+  const rocketLines = wrapText('🚀'.repeat(25), 20).split('\n');
+  assert.deepEqual(rocketLines, ['🚀'.repeat(10), '🚀'.repeat(10), '🚀'.repeat(5)]);
+  // A color code inside a long word stays whole, in place, and takes no room.
+  const colored = wrapText(`${'x'.repeat(18)}\x1b[31m${'y'.repeat(30)}\x1b[0m`, 20).split('\n');
+  assert.deepEqual(colored, [`${'x'.repeat(18)}\x1b[31myy`, 'y'.repeat(20), `${'y'.repeat(8)}\x1b[0m`]);
+  // A wide grapheme in a one-column room still moves on instead of looping or dropping it.
+  assert.equal(wrapText('한글', 3, '  ').split('\n').join(''), '  한  글');
+});
+
 test('main help has the sphinx mark and command help stays scoped at narrow widths', () => {
   const main = capture(); printHelp(main.ui);
   assert.ok(main.text().includes(SPHINX[0]));
@@ -71,6 +166,49 @@ test('status rows and narrow banners fit without decorative boxes or blue colors
     assert.ok(output.text().split('\n').every(line => stripAnsi(line).length <= width), `overflowed ${width} columns`);
     assert.equal(output.text().includes('\x1b[34m'), false);
   }
+});
+
+test('rows aligns Korean labels by display width', () => {
+  const entries = [
+    ['1. English', 'Alpha questions are asked in English, and this description is long enough to wrap onto a second and a third line.'],
+    ['2. 한국어 (Korean)', '한국어 설명은 영어 설명과 같은 칸에서 시작하고, 줄이 길어지면 같은 칸에 맞추어 이어서 쓰입니다. 마지막 줄까지 폭 안에 들어옵니다.'],
+  ];
+  for (const width of [68, 80, 100]) {
+    const output = capture({ width });
+    output.ui.rows(entries);
+    const lines = output.text().split('\n').filter(Boolean);
+    assert.ok(fits(output.text(), width), `width ${width}:\n${output.text()}`);
+    const english = lines.find(line => line.includes('1. English')), korean = lines.find(line => line.includes('2. 한국어'));
+    const column = startColumn(english, 'Alpha');
+    assert.equal(startColumn(korean, '한국어 설명은'), column, `width ${width}: both descriptions start in the same column\n${output.text()}`);
+    assert.ok(lines.filter(line => line !== english && line !== korean).every(line => line.match(/^ */)[0].length === column), `width ${width}: wrapped lines continue in that column\n${output.text()}`);
+  }
+  // A label too wide for the inline layout stacks its description under it, as English labels of that width do.
+  const stacked = capture({ width: 80 });
+  stacked.ui.rows([[`1. ${'한'.repeat(20)}`, 'A description.'], ['2. Plain', 'Another one.']]);
+  assert.ok(fits(stacked.text(), 80), stacked.text());
+  assert.match(stacked.text(), /^ {4}A description\.$/m);
+  for (const width of [20, 24, 40, 67]) {
+    const narrow = capture({ width });
+    narrow.ui.rows(entries);
+    assert.ok(fits(narrow.text(), width), `width ${width}:\n${narrow.text()}`);
+  }
+});
+
+test('table pads cells by display width', () => {
+  const output = capture();
+  output.ui.table(['Name', 'Calls'], [['한국어 라벨', '3'], ['English', '12']]);
+  assert.deepEqual(output.text().split('\n').filter(Boolean).map(displayWidth), [21, 21, 21], output.text());
+});
+
+test('English output is unchanged', () => {
+  // Captured from wrapText and rows before widths were measured in display columns: English words and emoji that were
+  // already two units wide measure the same.
+  const text = 'Ship it 🚀 now: the ✓ check passed, so the retry 🎉 is safe to push and \u{26A0}\u{FE0F} nothing else is waiting on you.';
+  assert.equal(wrapText(text, 30, '  '), '  Ship it 🚀 now: the ✓ check\n  passed, so the retry 🎉 is\n  safe to push and \u{26A0}\u{FE0F} nothing\n  else is waiting on you.');
+  const output = capture();
+  output.ui.rows([['Rocket 🚀', 'Ships the 🎉 release once the ✓ check passes and \u{26A0}\u{FE0F} nothing else is waiting on you at all today.'], ['Plain', 'No emoji here.']]);
+  assert.equal(output.text(), '  Rocket 🚀   Ships the 🎉 release once the ✓ check passes and \u{26A0}\u{FE0F} nothing else\n              is waiting on you at all today.\n  Plain       No emoji here.\n');
 });
 
 test('model progress uses only a live terminal and is suppressed for machine output', async () => {
@@ -402,4 +540,41 @@ test('on Windows, guided setup recommends a reviewer CLI only when Windows can s
   for (const seen of [codexOnly, await modelPicker(['claude'], 'win32'), await modelPicker([], 'linux'), await modelPicker([], 'darwin')]) assert.ok(!seen.description.includes('none was found'), seen.description);
   // Other systems still trust the agent the user selected.
   assert.equal((await modelPicker([], 'linux')).current, 'claude-economy');
+});
+
+test('install preselects the system language only for a first setup', () => {
+  assert.equal(installLanguage({ hasExistingConfig: false, current: { language: 'en' }, system: 'ko' }), 'ko');
+  assert.equal(installLanguage({ hasExistingConfig: true, current: { language: 'en' }, system: 'ko' }), 'en');
+});
+
+test('languageQuestion offers English and Korean with the given default', async () => {
+  assert.deepEqual(languageQuestion('ko'), {
+    title: 'Which language should questionnaires use?',
+    description: 'Questions, feedback, and questionnaire screens use this language, including questions quoted in GitHub comments. Other command output, Git hook messages, and Sphinx\'s own GitHub text stay in English. Change it later with sphinx config --language.',
+    current: 'ko',
+    choices: [
+      { value: 'en', label: 'English', description: 'Questions and questionnaire screens in English.' },
+      { value: 'ko', label: '한국어 (Korean)', description: 'Questions and questionnaire screens in Korean. Code, file paths, and Git terms stay as they are.' },
+    ],
+  });
+  // Enter takes the given default.
+  const output = capture();
+  assert.equal(await createPrompts({ ui: output.ui, ask: async () => '' }).choose(languageQuestion('en')), 'en');
+  assert.match(output.text(), /1\. English \(default\)/);
+});
+
+test('the install language question fits the terminal and aligns its descriptions at every width', async () => {
+  // Measured with .length, the Korean row ('2. 한국어 (Korean) (default)') overflowed at widths 27-29, 68-70, 76-78,
+  // 82-84, 87-89, 94-96 and 98-100, and its description started three columns right of the English row.
+  for (const current of ['en', 'ko']) {
+    for (let width = 20; width <= 100; width++) {
+      const output = capture({ width });
+      assert.equal(await createPrompts({ ui: output.ui, ask: async () => '' }).choose(languageQuestion(current)), current);
+      assert.ok(fits(output.text(), width), `${current} at ${width}:\n${output.text()}`);
+      if (width < 68) continue;
+      const lines = output.text().split('\n');
+      const english = lines.find(line => line.includes('1. English')), korean = lines.find(line => line.includes('2. 한국어'));
+      assert.equal(startColumn(korean, 'Questions'), startColumn(english, 'Questions'), `${current} at ${width}: the descriptions align\n${output.text()}`);
+    }
+  }
 });

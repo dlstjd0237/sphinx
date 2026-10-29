@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { get } from 'node:http';
+import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -9,8 +10,12 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createBrowserInterview, notifyDesktop, openQuestionnaireBrowser, unattendedGit } from '../src/browser-interview.js';
 import { SESSION_ENV } from '../src/activation.js';
-import { createSessionStore } from '../src/sessions.js';
-import { DEFAULT_CONFIG } from '../src/config.js';
+import { createSessionStore, DOCUMENTATION_REASON } from '../src/sessions.js';
+import { loadChangeView } from '../src/change-view.js';
+import { DEFAULT_CONFIG, saveOpenRouterKey } from '../src/config.js';
+import { EMPTY_FEEDBACK, FLAGGED_FEEDBACK } from '../src/evaluator.js';
+import { EN, join, localize, msg } from '../src/i18n.js';
+import { KO } from '../src/i18n-ko.js';
 import { claimCheckpointDialog, checkpointTerminalStatus, finishCheckpointDialog } from '../src/terminal-launch.js';
 import { recentOverrides } from '../src/overrides.js';
 import { textStream } from '../src/stream.js';
@@ -994,4 +999,334 @@ test('a held pass at an earlier destination of the push moves on without asking 
   assert.equal(f.interview.state.phase, 'passed');
   assert.match(f.interview.state.message, /^You passed\. This push has another destination to check next\./);
   assert.deepEqual([f.generated(), f.graded()], calls);
+});
+
+// The page's language chip.
+const setLanguage = (f, language) => fetch(`${f.interview.url}/action?language=1`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: new URL(f.interview.url).origin, 'X-Sphinx-Token': new URL(f.interview.url).pathname.slice(1) }, body: JSON.stringify({ language }) });
+// The states a page receives over its event stream, in order; leaving the loop (or return()) closes it.
+const events = url => new Promise((resolve, reject) => {
+  const request = get(`${url}/events`, response => resolve((async function* () {
+    try { for await (const line of createInterface({ input: response })) if (line.startsWith('data: ')) yield JSON.parse(line.slice('data: '.length)); }
+    finally { response.destroy(); request.destroy(); }
+  })()));
+  request.on('error', reject);
+});
+// Model or user text that only looks like a message reference, or like one drawn badly.
+const LOOKALIKE = '{"$t":"server.x"} {x} [object Object]';
+// Apart from that text, everything a page receives is drawn in its language.
+const drawnIn = (state, language) => {
+  assert.equal(state.language, language);
+  assert.doesNotMatch(JSON.stringify(state).replaceAll(JSON.stringify(LOOKALIKE).slice(1, -1), ''), /"\$t"|"\$join"|\[object Object\]/u);
+};
+const fill = (text, name, value) => text.replace(`{${name}}`, () => value);
+// A grade held at a gate still ends when the check stops, so a failed assertion cannot leave it running.
+const held = (gate, request) => Promise.race([gate, new Promise(resolve => request.signal.addEventListener('abort', resolve, { once: true }))]);
+
+test('a Korean questionnaire state carries Korean Sphinx sentences and no message references at any exit', async t => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const f = await fixture(t, {
+    generate: async (_n, options) => { await options.beforeCall(); return { questions: [{ ...q, prompt: LOOKALIKE }] }; },
+    grade: async request => { await held(gate, request); return { verdict: 'incorrect', feedback: 'Fair point, but the insert still repeats.', followUp: null }; },
+  });
+  f.config.language = 'ko';
+  const done = f.present(), question = await f.waitFor('question');
+  drawnIn(question, 'ko');
+  assert.equal(question.question.prompt, LOOKALIKE, 'model text is never read as a reference');
+  assert.equal(question.messages[0].text, LOOKALIKE);
+  // A page already open hears the next state from publish(); one opened later gets the current state first.
+  const open = await events(f.interview.url);
+  assert.equal((await open.next()).value.phase, 'question');
+  const reply = await f.post('dispute', { response: LOOKALIKE });
+  assert.equal(reply.status, 202);
+  // Bounded like waitFor: a page that never hears it fails here instead of hanging the run.
+  const published = await Promise.race([(async () => { for await (const state of open) if (state.phase === 'working') return state; })(), delay(3000)]);
+  const opened = await events(f.interview.url), first = (await opened.next()).value;
+  await opened.return();
+  const exits = { reply: await reply.json(), state: await (await fetch(`${f.interview.url}/state`)).json(), published, first, getter: f.interview.state };
+  for (const [exit, state] of Object.entries(exits)) {
+    drawnIn(state, 'ko');
+    assert.equal(state.message, KO['server.working.reviewingQuestion'], exit);
+    assert.equal(state.messages.at(-1).text, fill(KO['server.transcript.dispute'], 'text', LOOKALIKE), exit);
+  }
+  release();
+  const reopened = await f.waitFor('question');
+  drawnIn(reopened, 'ko');
+  assert.deepEqual(reopened.messages.slice(-2).map(item => item.text), ['Fair point, but the insert still repeats.', KO['server.transcript.sameQuestion']]);
+  const paused = await (await f.post('pause')).json();
+  drawnIn(paused, 'ko');
+  assert.equal(paused.message, KO['server.paused.gitStoppedPush']);
+  assert.equal((await done).status, 'pending');
+});
+
+test('the language action switches past Sphinx lines, the status and the consent text, keeps model text and the revision, and saves the setting', async t => {
+  const { readFile } = await import('node:fs/promises');
+  // At a question: Sphinx's lines change; the question, the answer and the grader's feedback do not.
+  const f = await fixture(t, { grade: async (_request, n) => n === 1 ? { verdict: 'incorrect', feedback: 'There is no durable deduplication.', followUp: null } : { verdict: 'correct', feedback: '', followUp: null } });
+  const done = f.present(); await f.waitFor('question');
+  await f.post('answer', { response: 'No.' });
+  const before = await f.waitFor('question');
+  assert.equal(before.language, 'en');
+  assert.equal(before.messages.at(-1).text, 'The same question is still open.');
+  const reply = await setLanguage(f, 'ko');
+  assert.equal(reply.status, 200);
+  for (const state of [await reply.json(), f.interview.state]) {
+    drawnIn(state, 'ko');
+    assert.equal(state.revision, before.revision, 'a display-only change keeps an answer being written current');
+    assert.deepEqual(state.messages.map(item => item.text), [q.prompt, 'No.', 'There is no durable deduplication.', KO['server.transcript.sameQuestion']]);
+  }
+  assert.equal(JSON.parse(await readFile(path.join(f.env.SPHINX_HOME, 'config.json'), 'utf8')).language, 'ko');
+  await f.post('answer', { response: 'Yes, the insert is repeated.' });
+  assert.equal((await f.waitFor('consent')).message, fill(KO['server.consent.questionPush'], 'lead', KO['server.result.passed']));
+  await f.confirm(); assert.equal((await done).status, 'passed');
+  // At the consent step: the status line and both choices change, and Continue still goes through.
+  const g = await fixture(t), finished = g.present(); await g.waitFor('question');
+  await g.post('answer', { response: 'Yes, the insert is repeated.' });
+  const asked = await g.waitFor('consent');
+  assert.equal(asked.message, 'You passed. Continue the push?');
+  const consent = await (await setLanguage(g, 'ko')).json();
+  drawnIn(consent, 'ko');
+  assert.equal(consent.revision, asked.revision);
+  assert.equal(consent.message, fill(KO['server.consent.questionPush'], 'lead', KO['server.result.passed']));
+  assert.deepEqual(consent.choices.map(choice => [choice.value, choice.label, choice.description]), [
+    ['proceed', KO['server.consent.continuePush'], KO['server.consent.continueDescriptionPush']],
+    ['stop', KO['server.consent.stopPush'], fill(KO['server.consent.stopDescription'], 'keptPass', KO['server.keptPass.push'])],
+  ]);
+  await g.confirm();
+  assert.equal((await finished).status, 'passed');
+  assert.equal(g.interview.state.message, `${fill(KO['server.passed.gitFinishingPush'], 'result', KO['server.result.passed'])}\n${KO['server.result.recordsNote']}`);
+});
+
+test('the language action rejects bad input', async t => {
+  const { readFile } = await import('node:fs/promises');
+  const f = await fixture(t), done = f.present(), before = await f.waitFor('question');
+  const url = `${f.interview.url}/action?language=1`, origin = new URL(f.interview.url).origin, token = new URL(f.interview.url).pathname.slice(1);
+  const send = (body, headers = {}) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin, 'X-Sphinx-Token': token, ...headers }, body });
+  for (const body of ['{"language":"fr"}', '{"language":"KO"}', '{"language":["ko"]}', '{}', 'null', '{']) {
+    const refused = await send(body);
+    assert.equal(refused.status, 400, body);
+    assert.deepEqual(await refused.json(), { error: 'Invalid language.' }, body);
+  }
+  for (const headers of [{ Origin: 'https://evil.example' }, { 'X-Sphinx-Token': 'wrong' }, { 'Content-Type': 'text/plain' }]) assert.equal((await send('{"language":"ko"}', headers)).status, 403, JSON.stringify(headers));
+  assert.equal((await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin }, body: '{"language":"ko"}' })).status, 403, 'no token');
+  assert.equal((await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Sphinx-Token': token }, body: '{"language":"ko"}' })).status, 403, 'no Origin');
+  assert.equal(f.interview.state.language, 'en'); assert.equal(f.interview.state.revision, before.revision);
+  await assert.rejects(readFile(path.join(f.env.SPHINX_HOME, 'config.json'), 'utf8'), { code: 'ENOENT' }, 'nothing was saved');
+  // Once closing, the page takes no new setting: close() is already writing what it has.
+  const closing = f.interview.close();
+  const late = await send('{"language":"ko"}');
+  assert.equal(late.status, 409);
+  assert.deepEqual(await late.json(), { error: 'This questionnaire is closing.' });
+  await closing;
+  assert.equal((await done).status, 'pending');
+  await assert.rejects(readFile(path.join(f.env.SPHINX_HOME, 'config.json'), 'utf8'), { code: 'ENOENT' });
+});
+
+test('a failed language save reports languageError and leaves the state error alone', async t => {
+  const f = await fixture(t, { grade: async (_request, n) => { if (n === 1) throw new Error('The grader is unavailable.'); return { verdict: 'correct', feedback: '', followUp: null }; } });
+  const done = f.present(); await f.waitFor('question');
+  await f.post('answer', { response: 'Yes, the insert is repeated.' });
+  for (let i = 0; i < 300 && !(f.interview.state.phase === 'question' && f.interview.state.error && !f.interview.state.message); i++) await delay(10);
+  const before = f.interview.state;
+  assert.match(before.error, /^The grader is unavailable\./u);
+  // Only the settings file is unusable, and only while the choice is saved: a folder stands where it would be
+  // written. (The session store reads that file before each model call, so it cannot stay there.)
+  const settings = path.join(f.env.SPHINX_HOME, 'config.json');
+  await mkdir(settings);
+  const reply = await setLanguage(f, 'ko');
+  await rm(settings, { recursive: true });
+  assert.equal(reply.status, 200);
+  const body = await reply.json();
+  assert.ok(body.languageError.startsWith(KO['server.language.saveFailed'].replace('{reason}', '')), body.languageError);
+  assert.match(body.languageError, /config\.json/u, 'the original error follows');
+  for (const state of [body, f.interview.state]) {
+    // The same error, now drawn in the chosen language: the grader's text stays as it was, Sphinx's sentence is Korean.
+    assert.equal(state.error, `The grader is unavailable. ${KO['common.grading.answerSaved']}`, 'the question\'s own error stays');
+    assert.equal(state.language, 'ko', 'this operation still uses the chosen language');
+  }
+  assert.equal(f.interview.state.languageError, undefined, 'the state never carries it');
+  const working = await (await f.post('answer', { response: 'Yes, the insert is repeated.' })).json();
+  assert.equal(working.message, KO['server.working.checkingAnswer']);
+  await f.confirm();
+  assert.equal((await done).status, 'passed');
+});
+
+test('two quick language actions and the model default save keep every key', async t => {
+  const { readFile } = await import('node:fs/promises');
+  const saved = async f => JSON.parse(await readFile(path.join(f.env.SPHINX_HOME, 'config.json'), 'utf8'));
+  const f = await fixture(t, { plans: ['claude'] });
+  const done = f.present(), state = await f.waitFor('question');
+  assert.equal((await pickModel(f, { provider: 'claude', model: 'sonnet', saveDefault: true })).status, 200);
+  // The second choice goes out while the first may still be saving.
+  const first = setLanguage(f, 'ko');
+  for (let i = 0; i < 300 && f.interview.state.language !== 'ko'; i++) await delay(1);
+  const second = setLanguage(f, 'en');
+  assert.deepEqual([(await first).status, (await second).status], [200, 200]);
+  assert.equal((await saved(f)).language, 'en', 'the last choice is the one kept');
+  await f.post('answer', { questionId: state.question.id, response: 'Yes, because the insert is unconditional.' });
+  await f.confirm();
+  assert.equal((await done).status, 'passed');
+  // A choice still saving when the operation ends is waited for, then the default model is written beside it.
+  const last = setLanguage(f, 'ko');
+  for (let i = 0; i < 300 && f.interview.state.language !== 'ko'; i++) await delay(1);
+  await f.interview.close();
+  assert.equal((await last).status, 200);
+  const settings = await saved(f);
+  assert.equal(settings.language, 'ko');
+  assert.deepEqual(settings.models.large, { provider: 'claude', model: 'sonnet' });
+});
+
+test('later grading and a restarted review receive the switched language', async t => {
+  const f = await fixture(t, { generate: async (attempt, options) => { await options.beforeCall(); if (attempt === 1) throw Object.assign(new Error('Review did not retain evidence.'), { code: 'INSUFFICIENT_EVIDENCE' }); return { questions: [q] }; } });
+  const seen = [], { start, answer } = f.store;
+  f.store.start = (...args) => { seen.push(['start', args[1].language]); return start(...args); };
+  f.store.answer = (...args) => { seen.push(['answer', args[2].language]); return answer(...args); };
+  const first = f.present({ ...f.request, more: true }); await f.waitFor('recovery');
+  assert.equal((await setLanguage(f, 'ko')).status, 200);
+  await f.post('retry'); await f.waitFor('question');
+  await f.post('answer', { response: 'Yes, the insert is repeated.' });
+  assert.equal((await first).status, 'passed');
+  // The next destination of the same push starts in the language chosen on the page.
+  const next = { ...f.snapshot, id: 'b'.repeat(64), target: { ref: 'refs/heads/master' } }; await f.store.ensure(next, f.config);
+  const last = f.present({ ...f.request, id: next.id, token: randomUUID() }); await f.waitFor('question');
+  assert.deepEqual(seen, [['start', 'en'], ['start', 'ko'], ['answer', 'ko'], ['start', 'ko']]);
+  assert.equal(f.config.language, 'en', 'the settings object the check read is left as it was');
+  await f.post('pause'); assert.equal((await last).status, 'pending');
+});
+
+test('in-flight grading keeps its language and the page stays consistent', async t => {
+  let entered, release;
+  const grading = new Promise(resolve => { entered = resolve; }), gate = new Promise(resolve => { release = resolve; });
+  const languages = [];
+  const f = await fixture(t, { grade: async (request, n) => {
+    if (n > 1) { languages.push(request.config.language); return { verdict: 'correct', feedback: '', followUp: null }; }
+    entered(); await held(gate, request); languages.push(request.config.language);
+    return { verdict: 'incorrect', feedback: 'There is no durable deduplication.', followUp: null };
+  } });
+  const done = f.present(); await f.waitFor('question');
+  assert.equal((await f.post('answer', { response: 'No.' })).status, 202);
+  await grading;
+  const before = f.interview.state;
+  assert.equal(before.message, 'Checking your reasoning…');
+  const switched = await (await setLanguage(f, 'ko')).json();
+  assert.equal(switched.revision, before.revision, 'a display-only update never makes the answer in flight stale');
+  assert.equal(switched.message, KO['server.working.checkingAnswer']);
+  release();
+  const after = await f.waitFor('question');
+  drawnIn(after, 'ko');
+  assert.equal(after.error, undefined, 'the answer in flight was graded');
+  assert.notEqual(after.revision, before.revision, 'the next step has a new revision, as always');
+  assert.deepEqual(after.messages.slice(1).map(item => [item.kind, item.text, item.status].filter(Boolean)), [['answer', 'No.', 'graded'], ['feedback', 'There is no durable deduplication.'], ['notice', KO['server.transcript.sameQuestion']]]);
+  await f.post('answer', { response: 'Yes, the insert is repeated.' });
+  assert.equal((await f.waitFor('consent')).message, fill(KO['server.consent.questionPush'], 'lead', KO['server.result.passed']));
+  await f.confirm(); assert.equal((await done).status, 'passed');
+  assert.deepEqual(languages, ['en', 'ko'], 'a grade already running keeps the language it started with');
+});
+
+// The change view of the fixture's checkpoint (no recorded head) cannot load; its reason arrives by itself.
+const unavailableView = async f => {
+  for (let i = 0; i < 300 && f.interview.state.change?.status !== 'unavailable'; i++) await delay(10);
+  return f.interview.state;
+};
+
+test('no screen output contains [object Object] or message references', async t => {
+  for (const language of ['en', 'ko']) {
+    const f = await fixture(t, { generate: async (attempt, options) => { await options.beforeCall(); if (attempt === 1) throw Object.assign(new Error('Review did not retain evidence.'), { code: 'INSUFFICIENT_EVIDENCE' }); return { questions: [q] }; } });
+    f.config.language = language;
+    const done = f.present();
+    await f.waitFor('recovery');
+    const draw = ref => localize(ref, language);
+    const usage = join([msg('common.usage.tokens', { n: '0' }), msg('common.usage.calls', { calls: 1, limit: 20 })], ' · ');
+    for (const state of [await unavailableView(f), await (await fetch(`${f.interview.url}/state`)).json()]) {
+      drawnIn(state, language);
+      assert.equal(state.message, draw(msg('common.recovery.reviewFailedTitle')));
+      assert.deepEqual(state.error.split('\n'), [draw(msg('common.recovery.waitingGit')), 'Review did not retain evidence.', draw(msg('common.recovery.usedSoFar', { usage }))]);
+      assert.deepEqual(state.choices.map(choice => [choice.value, choice.label, choice.description]), [
+        ['retry', draw(msg('common.recovery.retryWithin')), draw(join([msg('common.recovery.callsRemain', { remaining: 19, reserve: 1 }), msg('common.recovery.keepRoute')], ' '))],
+        ['pause', draw(msg('common.recovery.pauseLabel')), draw(msg('common.recovery.pauseDescription'))],
+      ]);
+      assert.equal(state.change.reason, draw(msg('server.changeView.headNotImmutable')));
+      if (language === 'ko') for (const text of [state.message, state.error, state.change.reason, ...state.choices.flatMap(choice => [choice.label, choice.description])]) assert.match(text, /[가-힣]/u, text);
+    }
+    await f.post('pause'); assert.equal((await done).status, 'pending');
+  }
+});
+
+test('a Korean page gets its HTTP errors, the change view reason, and the model menu in Korean', async t => {
+  const f = await fixture(t, { plans: ['claude'] });
+  // With an OpenRouter key the menu lists paid models, switched off.
+  await saveOpenRouterKey('sk-or-test', f.env);
+  f.config.language = 'ko';
+  const done = f.present(), question = await f.waitFor('question');
+  const stale = await f.post('answer', { response: 'Yes.' }, { ...question, revision: 'stale-revision' });
+  assert.equal(stale.status, 409);
+  assert.deepEqual(await stale.json(), { error: KO['server.http.checkpointChanged'] });
+  // The reason the change view is unavailable: in the state, and in the reply to GET /change and /diff while it is not ready.
+  assert.equal((await unavailableView(f)).change.reason, KO['server.changeView.headNotImmutable']);
+  for (const route of ['change', 'diff']) {
+    const reply = await fetch(`${f.interview.url}/${route}?id=${f.snapshot.id}&path=app.js`);
+    assert.deepEqual([reply.status, await reply.json()], [200, { status: 'unavailable', reason: KO['server.changeView.headNotImmutable'] }], route);
+  }
+  // The model menu and what it refuses.
+  const groups = f.interview.state.models.groups;
+  assert.deepEqual(groups.map(group => [group.provider, group.billing]), [['claude', KO['model.billing.plan']], ['openrouter', KO['model.billing.apiKey']]]);
+  assert.deepEqual(groups[0].models.map(option => option.note), [KO['model.note.fastest'], KO['model.note.stronger']]);
+  const paid = groups[1].models.find(option => option.model === 'deepseek/deepseek-v3.2');
+  assert.deepEqual([paid.note, paid.disabled], [KO['model.note.paid'], KO['model.choice.paidOff']]);
+  assert.equal(groups[1].models.find(option => option.model === 'openrouter/free').label, KO['model.option.freeRouter']);
+  for (const [picked, key] of [[{ provider: 'claude', model: 'opus' }, 'model.choice.notListed'], [{ provider: 'openrouter', model: 'deepseek/deepseek-v3.2' }, 'model.choice.paidOff']]) {
+    const refused = await pickModel(f, picked);
+    assert.deepEqual([refused.status, await refused.json()], [400, { error: KO[key] }], key);
+  }
+  await f.post('pause'); assert.equal((await done).status, 'pending');
+});
+
+test('the page is served in the chosen language', async t => {
+  const f = await fixture(t);
+  f.config.language = 'ko';
+  const done = f.present(); await f.waitFor('question');
+  const html = await (await fetch(f.interview.url)).text();
+  assert.match(html, /^<!doctype html>\n<html lang="ko">/u);
+  assert.ok(html.includes(`<title>${KO['page.title.default']}</title>`));
+  await f.post('pause'); assert.equal((await done).status, 'pending');
+});
+
+test('a file diff the change view refuses gets its reason in Korean on a Korean page', async t => {
+  // The real error class, from a checkpoint with no recorded files.
+  const ChangeViewError = (await loadChangeView({}, DEFAULT_CONFIG).catch(error => error)).constructor;
+  const header = { checkpoint: 'a'.repeat(64), repository: 'repo', event: 'pre-push', remote: 'origin', destination: 'refs/heads/main', base: null, head: 'b'.repeat(40), staged: false, excludedFiles: 0 };
+  const totals = { files: 0, additions: 0, deletions: 0, binaryFiles: 0, uncountedFiles: 0 };
+  const loadView = async () => ({ header, totals, summary: () => ({ header, totals, files: [], listed: 0 }), evidenceFor: async () => [],
+    diff: async () => { throw new ChangeViewError('server.changeView.fileNotInCheckpoint'); } });
+  const f = await fixture(t, { interviewOptions: { loadView } });
+  f.config.language = 'ko';
+  const done = f.present(); await f.waitFor('question');
+  for (let i = 0; i < 300 && f.interview.state.change?.status !== 'ready'; i++) await delay(10);
+  const reply = await fetch(`${f.interview.url}/diff?id=${f.snapshot.id}&path=elsewhere.js`);
+  assert.deepEqual([reply.status, await reply.json()], [404, { error: KO['server.changeView.fileNotInCheckpoint'] }]);
+  await f.post('pause'); assert.equal((await done).status, 'pending');
+});
+
+test('built-in fallback texts show in Korean on a Korean page', async t => {
+  assert.deepEqual([EN['common.fallback.flagged'], EN['common.fallback.empty'], EN['common.fallback.documentation']], [FLAGGED_FEEDBACK, EMPTY_FEEDBACK, DOCUMENTATION_REASON], 'an English page shows the stored sentences unchanged');
+  const replies = [{ verdict: 'ambiguous', feedback: FLAGGED_FEEDBACK, followUp: null }, { verdict: 'incorrect', feedback: EMPTY_FEEDBACK, followUp: null }];
+  const f = await fixture(t, { grade: async () => replies.shift() });
+  f.config.language = 'ko';
+  const done = f.present(); await f.waitFor('question');
+  await f.post('answer', { response: 'No.' });
+  const flagged = await f.waitFor('question');
+  assert.equal(flagged.feedback, KO['common.fallback.flagged']);
+  await f.post('answer', { response: 'Still no.' });
+  const empty = await f.waitFor('question');
+  assert.equal(empty.feedback, KO['common.fallback.empty']);
+  assert.deepEqual(empty.messages.filter(item => item.kind === 'feedback').map(item => item.text), [KO['common.fallback.flagged'], KO['common.fallback.empty']]);
+  await f.post('pause'); assert.equal((await done).status, 'pending');
+  // A documentation-only change passes with Sphinx's own reason.
+  const docs = await fixture(t, { snapshotOverrides: { files: ['README.md'] } });
+  docs.config.language = 'ko';
+  const finished = docs.present(), consent = await docs.waitFor('consent');
+  const reason = fill(KO['server.result.noQuestions'], 'reason', KO['common.fallback.documentation']);
+  assert.equal(consent.message, fill(KO['server.consent.questionPush'], 'lead', reason));
+  await docs.confirm(); assert.equal((await finished).status, 'passed');
+  assert.equal(docs.interview.state.message, fill(KO['server.passed.gitFinishingPush'], 'result', reason));
 });

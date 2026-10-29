@@ -7,6 +7,7 @@ import { isCliFailure, prepareInteractiveCheck } from '../src/check-recovery.js'
 import { createSessionStore } from '../src/sessions.js';
 import { DEFAULT_CONFIG } from '../src/config.js';
 import { createPrompts } from '../src/prompts.js';
+import { localize } from '../src/i18n.js';
 
 const snapshot = { id: 'b'.repeat(64), repoRoot: '/test/repo', event: 'pre-push', target: { ref: 'refs/heads/main' }, files: ['app.js'], stats: { additions: 5, deletions: 1, files: 1 } };
 const question = { id: 'duplicate', concept: 'idempotency', prompt: 'Can a retry duplicate the insert? Why?', choices: [], expectedAnswer: 'Yes, every request inserts.', rationale: 'There is no deduplication.', evidence: [{ path: 'app.js', reason: 'Unconditional insertion.' }] };
@@ -48,9 +49,9 @@ test('failed review waits for an explicit retry and keeps the same allowance and
   assert.equal(f.attempts(), 1);
   assert.equal(f.authorizations(), 0);
   assert.equal(prompt.current, 'pause');
-  assert.match(prompt.description, /original Git operation is waiting/);
+  assert.match(localize(prompt.description, 'en'), /original Git operation is waiting/);
   assert.deepEqual(prompt.choices.map(choice => choice.value), ['retry', 'pause']);
-  assert.match(prompt.choices[0].description, /9 calls remain/);
+  assert.match(localize(prompt.choices[0].description, 'en'), /9 calls remain/);
   assert.equal(await f.store.approved(snapshot, f.config), false);
   respond('retry');
   const state = await pending;
@@ -78,7 +79,7 @@ test('insufficient remaining calls require a separate explicit allowance and ret
   const f = await fixture(t, { maxModelCalls: 3 });
   const state = await f.run(prompt => {
     assert.deepEqual(prompt.choices.map(choice => choice.value), ['extend', 'pause']);
-    assert.match(prompt.choices[0].description, /Keep all 1 used calls counted/);
+    assert.match(localize(prompt.choices[0].description, 'en'), /Keep all 1 used calls counted/);
     assert.equal(f.authorizations(), 0);
     return 'extend';
   });
@@ -88,8 +89,9 @@ test('insufficient remaining calls require a separate explicit allowance and ret
   assert.deepEqual(record.reviewRetries.map(({ calls, previousLimit, limit }) => ({ calls, previousLimit, limit })), [{ calls: 1, previousLimit: 3, limit: 4 }]);
   assert.equal(record.status, 'active');
   assert.equal(await f.store.approved(snapshot, f.config), false);
-  assert.ok(f.messages.some(message => /Authorized up to 3 additional/.test(message)));
-  assert.ok(!f.messages.some(message => /--retry-review/.test(message)), 'the menu replaces Sphinx’s appended manual command hint');
+  assert.ok(f.messages.some(message => /Authorized up to 3 additional/.test(localize(message, 'en'))));
+  assert.ok(f.messages.includes('The reviewer did not retain changed-code evidence.'), 'the warning is the failure itself');
+  assert.ok(!f.messages.some(message => /--retry-review/.test(localize(message, 'en'))), 'the menu replaces Sphinx’s appended manual command hint');
 });
 
 test('an already exhausted review can explicitly recover without charging another failed preflight', async t => {
@@ -134,7 +136,7 @@ test('a medium review with 7 of 10 calls used reserves both grading calls before
   });
   const state = await f.run(prompt => {
     assert.deepEqual(prompt.choices.map(choice => choice.value), ['extend', 'pause']);
-    assert.match(prompt.choices[0].description, /3 calls remain; review needs at least 2 plus 2 reserved for grading/);
+    assert.match(localize(prompt.choices[0].description, 'en'), /3 calls remain; review needs at least 2 plus 2 reserved for grading/);
     return 'extend';
   });
   assert.equal(state.route.tier, 'medium');
@@ -246,7 +248,7 @@ test('an OpenRouter rate limit offers the installed coding-agent plans, and swit
     start: () => store.start(snapshot.id, f.config),
   });
   assert.deepEqual(f.prompts[0].choices.map(choice => choice.value).slice(0, 2), ['switch-claude', 'switch-codex']);
-  assert.match(f.prompts[0].choices[0].description, /signed-in Claude plan instead of OpenRouter/);
+  assert.match(localize(f.prompts[0].choices[0].description, 'en'), /signed-in Claude plan instead of OpenRouter/);
   assert.deepEqual(providers, ['claude']);
   assert.deepEqual(seen, ['openrouter', 'claude']);
   assert.equal(result.status, 'active');
@@ -282,7 +284,7 @@ test('a coding-agent CLI failure names the CLI and offers the other installed pl
   const f = await fixture(t, { generate: async (attempt, options) => { await options.beforeCall(); if (attempt === 1) throw cliFailure; return { questions: [question] }; } });
   await f.store.switchRoute(snapshot.id, f.config, 'codex');
   await f.run(prompt => prompt.choices[0].value, { planProviders: ['claude', 'codex'], switchRoute: provider => f.store.switchRoute(snapshot.id, f.config, provider), start: () => f.store.start(snapshot.id, f.config) });
-  assert.equal(f.prompts[0].title, 'Codex could not run this review');
+  assert.equal(localize(f.prompts[0].title, 'en'), 'Codex could not run this review');
   assert.deepEqual(f.prompts[0].choices.filter(choice => choice.value.startsWith('switch-')).map(choice => choice.value), ['switch-claude'], 'Never offers the CLI that just failed');
   assert.equal((await f.store.read(snapshot.id)).route.provider, 'claude');
 });
@@ -297,7 +299,7 @@ test('a coding-agent CLI that cannot start offers the other plan, never a retry'
   const f = await fixture(t, { generate: async (attempt, options) => { await options.beforeCall(); if (attempt === 1) throw cannotStart; return { questions: [question] }; } });
   await f.store.switchRoute(snapshot.id, f.config, 'codex');
   await f.run(prompt => prompt.choices[0].value, { planProviders: ['claude', 'codex'], switchRoute: provider => f.store.switchRoute(snapshot.id, f.config, provider), start: () => f.store.start(snapshot.id, f.config) });
-  assert.equal(f.prompts[0].title, 'Codex could not run this review');
+  assert.equal(localize(f.prompts[0].title, 'en'), 'Codex could not run this review');
   assert.deepEqual(f.prompts[0].choices.map(choice => choice.value), ['switch-claude', 'pause'], 'Starting the same CLI again cannot help');
   assert.equal((await f.store.read(snapshot.id)).route.provider, 'claude');
 });

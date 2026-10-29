@@ -6,7 +6,10 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DEFAULT_CONFIG, writeJson } from '../src/config.js';
 import { createSessionStore, savedDraft, sessionFile } from '../src/sessions.js';
+import { EMPTY_FEEDBACK, FLAGGED_FEEDBACK } from '../src/evaluator.js';
 import { OpenRouterError } from '../src/openrouter.js';
+import { localize } from '../src/i18n.js';
+import { KO } from '../src/i18n-ko.js';
 
 const q={id:'retry',concept:'idempotency',prompt:'Can a repeated request duplicate the operation? Give the cause.',choices:['Yes','No'],expectedAnswer:'Yes: no deduplication.',rationale:'The insert happens on every call.',evidence:[{path:'src/order.js',reason:'An unconditional insert.'}]};
 const snapshot={id:'a'.repeat(64),repoRoot:'/test/repo',repoId:'r',event:'pre-push',target:{ref:'refs/heads/main'},files:['src/order.js'],evidence:'insert()',stats:{additions:10,deletions:1,files:1}};
@@ -92,6 +95,28 @@ test('ambiguous grading does not produce a receipt',async t=>{
   await store.ensure(snapshot,config);await store.start(snapshot.id,config);
   assert.equal((await store.answer(snapshot.id,'There may be a unique index.',config)).status,'active');
   assert.equal(await store.approved(snapshot,config),false);
+});
+
+test('a built-in feedback sentence records its code, model feedback clears it', async t => {
+  // The session keeps Sphinx's English sentences; the code lets each screen draw them in the questionnaire language.
+  assert.equal(FLAGGED_FEEDBACK, 'The question or answer key does not match the code. Your answer has not been marked wrong and no concept was completed. Review the replacement question if one is available.');
+  assert.equal(EMPTY_FEEDBACK, 'The grader returned no explanation this time.');
+  const steps = [[FLAGGED_FEEDBACK, 'flagged'], [EMPTY_FEEDBACK, 'empty'], ['Because the cache is cleared first.', undefined]];
+  const replies = steps.map(([feedback]) => feedback);
+  const { store, config } = await fixture(t, { grade: async () => ({ verdict: 'ambiguous', feedback: replies.shift(), followUp: null }) });
+  await store.ensure(snapshot, config); await store.start(snapshot.id, config);
+  for (const [feedback, code] of steps) {
+    const answered = await store.answer(snapshot.id, 'It may be cached.', config);
+    const saved = await store.read(snapshot.id);
+    assert.equal(saved.lastFeedback, feedback, 'the session keeps the English text');
+    assert.equal(saved.lastFeedbackCode, code);
+    assert.equal(Object.hasOwn(saved, 'lastFeedbackCode'), code !== undefined, 'no code means no key');
+    for (const state of [answered, store.public(saved)]) {
+      assert.equal(state.feedback, feedback);
+      assert.equal(state.feedbackCode, code);
+      assert.equal(Object.hasOwn(state, 'feedbackCode'), code !== undefined, 'the public state adds the code only when there is one');
+    }
+  }
 });
 
 test('learning and dispute requests cannot award a pass',async t=>{
@@ -568,6 +593,41 @@ test('a documentation-only change passes with no model call, before any page ope
   assert.equal(await store.passTrivial(mixed.id, config), false, 'Any code file needs a real check');
 });
 
+test('a documentation-only pass records noQuestionCode', async t => {
+  const review = { version: 1, summary: 'Renamed a local variable.', evidence: 'x', evidencePaths: ['src/order.js'], toolCalls: 1, compactions: 0 };
+  const reason = 'Only renames a local variable; behavior is unchanged.';
+  let calls = 0;
+  const { store, env, config } = await fixture(t, { generate: async (_s, _c, { beforeCall }) => { calls++; await beforeCall(); return { questions: [], noQuestionReason: reason, review }; } });
+  // A documentation-only change passes either before any page opens (passTrivial) or when its check is started.
+  const trivial = { ...snapshot, id: 'd'.repeat(64), files: ['README.md', 'docs/guide.mdx'] };
+  const started = { ...snapshot, id: 'e'.repeat(64), files: ['LICENSE'] };
+  await store.ensure(trivial, config); await store.ensure(started, config);
+  assert.equal(await store.passTrivial(trivial.id, config), true);
+  const passes = [store.public(await store.read(trivial.id)), await store.start(started.id, config)];
+  for (const state of passes) {
+    assert.equal(state.status, 'passed');
+    assert.equal(state.noQuestionReason, 'Documentation-only change.', 'the session keeps the English sentence');
+    assert.equal(state.noQuestionCode, 'documentation');
+    assert.equal((await store.read(state.id)).noQuestionCode, 'documentation');
+  }
+  assert.equal(calls, 0, 'no model call');
+  // A reason the reviewer chose carries no code: recorded by background preparation, then passed by starting the check.
+  // A code left on the record by an earlier pass is cleared, not kept beside a reason it does not describe.
+  await store.ensure(snapshot, config);
+  await store.prepare(snapshot.id, config);
+  const prepared = await store.read(snapshot.id);
+  assert.equal(prepared.status, 'pending');
+  assert.equal(prepared.noQuestionReason, reason);
+  assert.equal(Object.hasOwn(prepared, 'noQuestionCode'), false);
+  await writeJson(sessionFile(snapshot.id, env), { ...prepared, noQuestionCode: 'documentation' });
+  const chosen = await store.start(snapshot.id, config);
+  assert.equal(chosen.status, 'passed');
+  assert.equal(chosen.noQuestionReason, reason);
+  assert.equal(Object.hasOwn(chosen, 'noQuestionCode'), false, 'the public state adds the code only when there is one');
+  assert.equal(Object.hasOwn(await store.read(snapshot.id), 'noQuestionCode'), false);
+  assert.equal(calls, 1, 'starting the prepared check made no new review');
+});
+
 test('a small change the reviewer finds trivial passes with its reason; a larger one never passes with zero questions', async t => {
   const review = { version: 1, summary: 'Renamed a local variable.', evidence: 'x', evidencePaths: ['src/order.js'], toolCalls: 1, compactions: 0 };
   const small = await fixture(t, { generate: async (_s, _c, { beforeCall }) => { await beforeCall(); return { questions: [], noQuestionReason: 'Only renames a local variable; behavior is unchanged.', review }; } });
@@ -676,6 +736,30 @@ test('a grader reply Sphinx cannot use is explained in plain words with the orig
   await store.ensure(snapshot, config); await store.start(snapshot.id, config);
   await assert.rejects(store.answer(snapshot.id, 'Teach me.', config, { learn: true }), error => error === outage);
   await assert.rejects(store.answer(snapshot.id, 'Yes.', config), error => error.message === 'Provider unavailable. Your answer was saved and is offered again when you resume this question.' && error.detail === undefined);
+});
+
+test('errors the questionnaire shows keep their English message and carry a ref that draws it', async t => {
+  const draws = key => error => {
+    assert.equal(localize(error.ref, 'en'), error.message, key);
+    assert.ok(localize(error.ref, 'ko').includes(KO[key]), key);
+    return true;
+  };
+  const unusable = Object.assign(new Error('Return one complete JSON object.'), { code: 'INVALID_MODEL_OUTPUT' });
+  const outage = Object.assign(new Error('Provider unavailable.'), { code: 'OPENROUTER_PROVIDER_ERROR' });
+  const failures = [unusable, unusable, outage, outage];
+  const { store, config } = await fixture(t, { grade: async () => { const failure = failures.shift(); if (failure) throw failure; return { verdict: 'correct', feedback: '', followUp: null }; } });
+  await store.ensure(snapshot, config); await store.start(snapshot.id, config);
+  await assert.rejects(store.answer(snapshot.id, 'Yes.', config), draws('common.grading.unusableAnswer'));
+  await assert.rejects(store.answer(snapshot.id, 'Teach me.', config, { learn: true }), draws('common.grading.unusableExplanation'));
+  await assert.rejects(store.answer(snapshot.id, 'Yes.', config), draws('common.grading.answerSaved'));
+  await assert.rejects(store.answer(snapshot.id, 'It assumes one worker.', config, { dispute: true }), draws('common.grading.disputeSaved'));
+  await assert.rejects(store.answer(snapshot.id, 'x'.repeat(8001), config), draws('common.answer.tooLong'));
+  const changed = { ...config, level: 'thorough' };
+  for (const refused of [() => store.answer(snapshot.id, 'Yes.', changed), () => store.switchRoute(snapshot.id, changed, 'claude'), () => store.refreshBudget(snapshot.id, changed)]) await assert.rejects(refused(), draws('common.session.settingsChanged'));
+  await assert.rejects(store.switchRoute(snapshot.id, config, 'elsewhere'), draws('server.switchRoute.unknownProvider'));
+  await assert.rejects(store.switchRoute(snapshot.id, config, 'openrouter'), draws('server.switchRoute.planOnly'));
+  assert.equal((await store.answer(snapshot.id, 'Yes: it inserts every time.', config)).status, 'passed');
+  await assert.rejects(store.switchRoute(snapshot.id, config, 'claude'), draws('server.switchRoute.unfinishedOnly'));
 });
 
 test('a renamed replacement id skips every id the check has used and stays within 80 characters', async t => {

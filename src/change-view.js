@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import { loadIgnorePolicy } from './ignore.js';
 import { workspaceDiffText } from './review-workspace.js';
 import { repositoryName } from './git.js';
+import { msg, t } from './i18n.js';
 
 const exec = promisify(execFile);
 const OID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
@@ -13,10 +14,11 @@ const REGULAR = new Set(['100644', '100755']);
 export const VIEW_LIMITS = Object.freeze({ files: 2000, rows: 3000, bytes: 2 * 1024 * 1024, evidenceBytes: 8 * 1024 * 1024 });
 export const CONTEXT_LEVELS = Object.freeze({ 3: 3, 25: 25, all: 1000000 });
 
+// The page shows the reason in the questionnaire language (ref); the message stays English.
 class ChangeViewError extends Error {
-  constructor(message) { super(message); this.code = 'CHANGE_VIEW_UNAVAILABLE'; }
+  constructor(key) { super(t('en', key)); this.code = 'CHANGE_VIEW_UNAVAILABLE'; this.ref = msg(key); }
 }
-const unavailable = message => { throw new ChangeViewError(message); };
+const unavailable = key => { throw new ChangeViewError(key); };
 const decoder = () => new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 async function git(root, args, { env, buffer = false, maxBuffer = 16 * 1024 * 1024 } = {}) {
@@ -28,7 +30,7 @@ async function git(root, args, { env, buffer = false, maxBuffer = 16 * 1024 * 10
     return stdout;
   } catch (error) {
     if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return null;
-    unavailable('The checkpoint’s Git objects are unavailable.');
+    unavailable('server.changeView.objectsUnavailable');
   }
 }
 
@@ -36,7 +38,7 @@ function treeEntries(raw) {
   const entries = new Map();
   for (const row of raw.split('\0').filter(Boolean)) {
     const match = /^(\d{6}) (?:blob|tree|commit) ([a-f0-9]+)\t([\s\S]*)$/u.exec(row);
-    if (!match || !OID.test(match[2])) unavailable('The checkpoint inventory is malformed.');
+    if (!match || !OID.test(match[2])) unavailable('server.changeView.inventoryMalformed');
     entries.set(match[3], { mode: match[1], oid: match[2] });
   }
   return entries;
@@ -47,10 +49,10 @@ function rawRows(raw) {
   const fields = raw.split('\0'), rows = [];
   for (let index = 0; index < fields.length - 1;) {
     const match = /^:(\d{6}) (\d{6}) ([a-f0-9]+) ([a-f0-9]+) ([A-Z])\d*$/u.exec(fields[index++]);
-    if (!match) unavailable('The checkpoint comparison is malformed.');
+    if (!match) unavailable('server.changeView.comparisonMalformed');
     const [, oldMode, newMode, oldOid, newOid, status] = match;
     const first = fields[index++], second = status === 'R' || status === 'C' ? fields[index++] : undefined;
-    if (!first || (second === '' )) unavailable('The checkpoint comparison is malformed.');
+    if (!first || (second === '' )) unavailable('server.changeView.comparisonMalformed');
     rows.push({ status, oldMode, newMode, oldOid, newOid, oldPath: first, newPath: second ?? first });
   }
   return rows;
@@ -61,7 +63,7 @@ function numstatRows(raw) {
   const fields = raw.split('\0'), stats = new Map();
   for (let index = 0; index < fields.length - 1;) {
     const row = fields[index++], first = row.indexOf('\t'), second = row.indexOf('\t', first + 1);
-    if (first < 0 || second < 0) unavailable('The checkpoint line counts are malformed.');
+    if (first < 0 || second < 0) unavailable('server.changeView.lineCountsMalformed');
     const added = row.slice(0, first), deleted = row.slice(first + 1, second);
     let path = row.slice(second + 1);
     if (!path) { index++; path = fields[index++]; }
@@ -120,14 +122,14 @@ function mergeRanges(ranges) {
  * from immutable blob IDs recorded for the checkpoint, never the working tree. */
 export async function loadChangeView(snapshot, config, { env = process.env } = {}) {
   const root = snapshot?.repoRoot;
-  if (typeof root !== 'string' || !Array.isArray(snapshot.files)) unavailable('This checkpoint has no recorded file inventory.');
-  if (snapshot.base && !OID.test(snapshot.base)) unavailable('The checkpoint base is not an immutable Git object.');
+  if (typeof root !== 'string' || !Array.isArray(snapshot.files)) unavailable('server.changeView.noInventory');
+  if (snapshot.base && !OID.test(snapshot.base)) unavailable('server.changeView.baseNotImmutable');
   const commit = snapshot.event === 'pre-commit';
-  if (commit && !Array.isArray(snapshot.indexEntries)) unavailable('This older commit checkpoint did not record its staged file inventory.');
-  if (!commit && !OID.test(snapshot.head || '')) unavailable('The checkpoint head is not an immutable Git object.');
+  if (commit && !Array.isArray(snapshot.indexEntries)) unavailable('server.changeView.noStagedInventory');
+  if (!commit && !OID.test(snapshot.head || '')) unavailable('server.changeView.headNotImmutable');
   const run = (args, options = {}) => git(root, args, { ...options, env });
   const ignore = await loadIgnorePolicy(root, { env, exclude: config.exclude });
-  if (snapshot.ignoreHash && ignore.hash !== snapshot.ignoreHash) unavailable('The exclusion rules changed after this checkpoint was created.');
+  if (snapshot.ignoreHash && ignore.hash !== snapshot.ignoreHash) unavailable('server.changeView.exclusionsChanged');
   const format = (await run(['rev-parse', '--show-object-format']))?.trim();
   const emptyTree = createHash(format === 'sha256' ? 'sha256' : 'sha1').update('tree 0\0').digest('hex');
   const base = snapshot.base ? treeEntries(await run(['ls-tree', '-r', '-z', '--full-tree', snapshot.base]) ?? '') : new Map();
@@ -137,17 +139,17 @@ export async function loadChangeView(snapshot, config, { env = process.env } = {
   const comparison = ['diff', '--no-ext-diff', '--no-textconv', '--no-color', '-M', ...(commit ? ['--cached', snapshot.base || emptyTree] : [snapshot.base || emptyTree, snapshot.head])];
   const raw = await run([...comparison, '--raw', '-z', '--no-abbrev', '--']);
   const numstat = await run([...comparison, '--numstat', '-z', '--']);
-  if (raw === null || numstat === null) unavailable('The checkpoint comparison is too large to display.');
+  if (raw === null || numstat === null) unavailable('server.changeView.tooLarge');
   // A commit checkpoint compares against the live index. Accept it only when
   // it still matches the pinned index entries and did not move mid-read.
-  if (commit && (await run([...comparison, '--raw', '-z', '--no-abbrev', '--'])) !== raw) unavailable('The staged changes moved while loading the checkpoint.');
+  if (commit && (await run([...comparison, '--raw', '-z', '--no-abbrev', '--'])) !== raw) unavailable('server.changeView.stagedMoved');
   const stats = numstatRows(numstat), files = [], seen = new Set();
   const allowed = path => !ignore.matches(path);
   for (const row of rawRows(raw)) {
     const oldSide = row.status === 'A' ? null : { path: row.oldPath, mode: row.oldMode, oid: row.oldOid };
     const newSide = row.status === 'D' ? null : { path: row.newPath, mode: row.newMode, oid: row.newOid };
     for (const [side, tree] of [[oldSide, base], [newSide, head]]) {
-      if (side && allowed(side.path) && tree.get(side.path)?.oid !== side.oid) unavailable('The checkpoint comparison no longer matches its recorded Git objects.');
+      if (side && allowed(side.path) && tree.get(side.path)?.oid !== side.oid) unavailable('server.changeView.objectsMismatch');
     }
     let from = oldSide && allowed(oldSide.path) ? oldSide : null, to = newSide && allowed(newSide.path) ? newSide : null;
     if (!from && !to) continue;
@@ -166,7 +168,7 @@ export async function loadChangeView(snapshot, config, { env = process.env } = {
     });
   }
   const recorded = new Set(snapshot.files);
-  if (seen.size !== recorded.size || [...seen].some(path => !recorded.has(path))) unavailable('The displayed comparison does not match the reviewed file list.');
+  if (seen.size !== recorded.size || [...seen].some(path => !recorded.has(path))) unavailable('server.changeView.filesMismatch');
   files.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
   const byPath = new Map(files.map(file => [file.path, file]));
   const totals = summarize(files);
@@ -186,7 +188,7 @@ export async function loadChangeView(snapshot, config, { env = process.env } = {
 
   async function diff(path, { context = 3 } = {}) {
     const file = byPath.get(path);
-    if (!file) unavailable('That file is not part of this checkpoint.');
+    if (!file) unavailable('server.changeView.fileNotInCheckpoint');
     const level = Object.hasOwn(CONTEXT_LEVELS, context) ? context : 3;
     const result = { path: file.path, ...(file.oldPath ? { oldPath: file.oldPath } : {}), status: file.status, binary: file.binary, additions: file.additions, deletions: file.deletions, ...(file.modeChange ? { modeChange: file.modeChange } : {}), context: String(level), hunks: [], truncated: null, note: null };
     const kinds = [file.oldKind, file.newKind].filter(Boolean);
